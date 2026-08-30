@@ -26,6 +26,8 @@ from __future__ import annotations  # 允许所有注解以字符串形式求值
 import os
 import sys
 import glob
+import time
+import datetime
 import shutil
 import subprocess
 import importlib
@@ -44,6 +46,160 @@ MIN_FRAMES = 21
 def _warn(msg: str) -> None:
     """统一的清理/非致命错误告警通道（写到 stderr，避免与节点 stdout 混在一起）。"""
     print(f"[Comfy-FlashVSR-Trunk][warn] {msg}", file=sys.stderr, flush=True)
+
+
+# ---------------------------------------------------------------------------
+# 实时进度上报（WebSocket -> 前端展示面板）
+# ---------------------------------------------------------------------------
+# PromptServer 实例是惰性探测的：离线 / 测试环境没有 server 模块时返回 None，
+# 此时 ProgressReporter 自动降级为「只维护统计、不发送」，主流程完全不受影响。
+_PROMPT_SERVER: Any = None
+_PROMPT_SERVER_READY: bool = False
+
+
+def _get_prompt_server() -> Any:
+    """获得 ComfyUI PromptServer 实例；非 ComfyUI 环境返回 None。"""
+    global _PROMPT_SERVER, _PROMPT_SERVER_READY
+    if _PROMPT_SERVER_READY:
+        return _PROMPT_SERVER
+    _PROMPT_SERVER_READY = True
+    try:
+        try:
+            from server import PromptServer  # 旧版 ComfyUI
+        except Exception:
+            from comfy.server import PromptServer  # 新版 ComfyUI
+        s = PromptServer.instance
+        if s is not None:
+            _PROMPT_SERVER = s
+    except Exception:
+        _PROMPT_SERVER = None
+    return _PROMPT_SERVER
+
+
+def _interrupted() -> bool:
+    """当前渲染是否被用户取消（ComfyUI 中断标志）。非 ComfyUI 环境返回 False。"""
+    try:
+        from comfy import model_management as mm
+        return bool(mm.processing_interrupted())
+    except Exception:
+        return False
+
+
+def _raise_cancel() -> None:
+    """以 ComfyUI 可识别的中断异常上抛，使节点显示为「已取消」而非红色报错。"""
+    try:
+        from comfy import model_management as mm
+        raise mm.InterruptProcessingException()
+    except Exception:
+        raise RuntimeError("用户已取消渲染")
+
+
+def _uuid_hex() -> str:
+    import uuid
+    return uuid.uuid4().hex
+
+
+class ProgressReporter:
+    """通过 ComfyUI WebSocket 向前端面板推送渲染进度。
+
+    字段（`data` 字典）覆盖面板所需的全部信息：
+      node / run_id / status / started_at / elapsed_s / eta_s
+      total_chunks / done_chunks / failed_chunks
+      total_frames / processed_frames
+      src_res / out_res / video_before / video_after / message
+
+    status 取值：running | done | failed | cancelled。
+    若环境无 PromptServer（离线测试 / 非 ComfyUI），自动降级为 no-op。
+    """
+
+    def __init__(self, node: str = "FlashVSR_Trunk", run_id: str = "") -> None:
+        self.node = node
+        self.run_id = run_id or _uuid_hex()
+        self.started_at = time.time()
+        self._server = _get_prompt_server()
+        self.total_chunks = 0
+        self.done_chunks = 0
+        self.failed_chunks = 0
+        self.total_frames = 0
+        self.processed_frames = 0
+        self.src_res = ""
+        self.out_res = ""
+        self.video_before = ""
+        self.video_after = ""
+        self.message = ""
+
+    # -- 内部发送 --
+    def _emit(self, status: str, **extra: Any) -> None:
+        elapsed = time.time() - self.started_at
+        data: Dict[str, Any] = {
+            "node": self.node,
+            "run_id": self.run_id,
+            "status": status,
+            "started_at": self.started_at,
+            "elapsed_s": round(elapsed, 1),
+            "total_chunks": self.total_chunks,
+            "done_chunks": self.done_chunks,
+            "failed_chunks": self.failed_chunks,
+            "total_frames": self.total_frames,
+            "processed_frames": self.processed_frames,
+            "src_res": self.src_res,
+            "out_res": self.out_res,
+            "video_before": self.video_before,
+            "video_after": self.video_after,
+            "message": self.message,
+        }
+        data.update(extra)
+        if status == "running" and self.processed_frames > 0 and self.total_frames > 0:
+            frac = self.processed_frames / self.total_frames
+            if frac < 1:
+                data["eta_s"] = round(elapsed * (1 - frac) / frac, 1)
+        try:
+            self._send(data)
+        except Exception:
+            pass
+
+    def _send(self, data: Dict[str, Any]) -> None:
+        if self._server is None:
+            return
+        try:
+            self._server.send_json({"type": "flashvsr_trunk_progress", "data": data})
+        except Exception:
+            pass
+
+    # -- 便捷状态切换 --
+    def start(self, *, total_chunks: int, total_frames: int,
+              src_res: str = "", video_before: str = "") -> None:
+        self.total_chunks = total_chunks
+        self.total_frames = total_frames
+        self.src_res = src_res
+        self.video_before = video_before
+        self.done_chunks = 0
+        self.failed_chunks = 0
+        self.processed_frames = 0
+        self._emit("running")
+
+    def chunk_done(self, effective_frames: int) -> None:
+        self.done_chunks += 1
+        self.processed_frames += effective_frames
+        self._emit("running")
+
+    def merge(self) -> None:
+        self.message = "合并分块（重叠去重 + 复用源音频）..."
+        self._emit("running", phase="merge")
+
+    def done(self, *, out_res: str = "", video_after: str = "") -> None:
+        self.out_res = out_res
+        self.video_after = video_after
+        self.message = "完成"
+        self._emit("done")
+
+    def failed(self, error: str) -> None:
+        self.message = error
+        self._emit("failed")
+
+    def cancelled(self) -> None:
+        self.message = "用户已取消"
+        self._emit("cancelled")
 
 
 # ---------------------------------------------------------------------------
@@ -118,6 +274,29 @@ def resolve_output_dir(output_dir: str, default_dir: str) -> str:
     d = os.path.abspath(os.path.expanduser(d))
     os.makedirs(d, exist_ok=True)
     return d
+
+
+def timestamped_output_path(out_dir: str, base_name: str, ext: str = ".mp4") -> str:
+    """在原基名后追加精确到秒的时间戳（yyyyMMdd_HHmmss），并避免覆盖已有文件。
+
+    - ``base_name`` 应已通过 :func:`safe_output_name` 规范化（无目录/非法字符）；
+    - 时间戳格式与用户要求一致：``原名_20260830_172300.mp4``；
+    - 若同秒已存在同名文件，依次追加 ``_1`` / ``_2`` ... 直到不冲突（永不覆盖）。
+    """
+    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    name = f"{base_name}_{ts}"
+    return _no_overwrite(os.path.join(out_dir, name + ext))
+
+
+def _no_overwrite(path: str) -> str:
+    """若 path 已存在，返回 ``<base>_1<ext>`` 形式的空闲路径（递增后缀）。"""
+    if not os.path.exists(path):
+        return path
+    base, ext = os.path.splitext(path)
+    i = 1
+    while os.path.exists(f"{base}_{i}{ext}"):
+        i += 1
+    return f"{base}_{i}{ext}"
 
 # 基础节点 preset -> 内部参数 (mode, sr, kvr, lr, td, tv, ts, to)
 # 与 ComfyUI-FlashVSR/AILab_FlashVSR.py 中的 presets 映射保持一致
@@ -439,7 +618,8 @@ class FlashVSRPipe:
 # 上采样入口（张量版，用于 drop-in 节点）
 # ---------------------------------------------------------------------------
 def upscale_frames_chunked(frames: "Any", params: Dict[str, Any], advanced: bool,
-                            chunk_size: int, overlap: int) -> "Any":
+                            chunk_size: int, overlap: int,
+                            reporter: Any = None) -> "Any":
     """对整段 frames 张量做重叠分块上采样，返回拼接后的张量。
 
     frames: torch.Tensor [B,H,W,3] float32 in [0,1]
@@ -452,17 +632,41 @@ def upscale_frames_chunked(frames: "Any", params: Dict[str, Any], advanced: bool
         raise ValueError(f"FlashVSR 至少需要 {MIN_FRAMES} 帧，当前仅 {total} 帧。")
 
     chunks = plan_chunks(total, chunk_size, overlap)
-    pipe = FlashVSRPipe(params, advanced)
+    if reporter is not None:
+        reporter.start(total_chunks=len(chunks), total_frames=total)
+    pipe = None
     try:
+        pipe = FlashVSRPipe(params, advanced)
         outs = []
         for (s, e) in chunks:
+            if reporter is not None and _interrupted():
+                reporter.cancelled()
+                _raise_cancel()
             cf = frames[s:e]
             up = pipe.upscale_chunk(cf)
             up = _trim_overlap(up, s, e, total, overlap)
             outs.append(up)
+            if reporter is not None:
+                eff = (e - s) - (overlap if s > 0 else 0)
+                reporter.chunk_done(eff)
+        if reporter is not None:
+            reporter.done()
+        return torch.cat(outs, dim=0)
+    except Exception as e:
+        try:
+            if reporter is not None:
+                if _interrupted():
+                    reporter.cancelled()
+                else:
+                    reporter.failed(str(e)[:300])
+        except Exception:
+            pass
+        if _interrupted():
+            _raise_cancel()
+        raise
     finally:
-        pipe.close()
-    return torch.cat(outs, dim=0)
+        if pipe is not None:
+            pipe.close()
 
 
 # ---------------------------------------------------------------------------
@@ -580,7 +784,9 @@ def merge_chunk_videos(chunk_paths: List[str], out_path: str, overlap: int,
                        source_audio_path: Optional[str] = None,
                        fps: Optional[float] = None, crf: int = 19,
                        pix_fmt: str = "yuv420p",
-                       ff: Optional[str] = None) -> str:
+                       ff: Optional[str] = None,
+                       reporter: Any = None,
+                       count_as_chunks: bool = False) -> str:
     """拼接分块视频：每段裁掉重叠区（头/尾各 overlap 帧），最后复用源音频合成最终 mp4。
 
     与历史 merge_overlap.py 逻辑一致，但做成可复用函数。
@@ -593,6 +799,10 @@ def merge_chunk_videos(chunk_paths: List[str], out_path: str, overlap: int,
         segs = []
         n = len(chunk_paths)
         for i, p in enumerate(chunk_paths):
+            if reporter is not None and not count_as_chunks:
+                # 流水线内调用：仅上报合并相位，不改动分块计数（由调用方 start 维护）
+                reporter._emit("running", phase="merge",
+                               merge_done=i, merge_total=n)
             F = probe_frames(p, ff)
             if F is None:
                 raise RuntimeError(f"无法探测分块帧数: {p}")
@@ -616,6 +826,9 @@ def merge_chunk_videos(chunk_paths: List[str], out_path: str, overlap: int,
                     f"  ffmpeg stderr 尾部:\n    " + "\n    ".join(tail)
                 ) from None
             segs.append(outp)
+            if reporter is not None and count_as_chunks:
+                # 合并节点主任务：每段计 1 个单位，推进 done_chunks / processed_frames
+                reporter.chunk_done(1)
 
         listf = os.path.join(tmp, "list.txt")
         with open(listf, "w", encoding="utf-8") as f:
@@ -656,7 +869,8 @@ def run_file_pipeline(src_video: str, params: Dict[str, Any], advanced: bool,
                       out_path: str, chunk_size: int = 128, overlap: int = 16,
                       fps: Optional[float] = None, crf: int = 19,
                       ff: Optional[str] = None,
-                      log: Callable[[str], Any] = print) -> str:
+                      log: Callable[[str], Any] = print,
+                      reporter: Any = None) -> str:
     """完整的 RAM-safe 文件流水线（FlashVSR_Trunk 节点核心）。
 
     1. 探测总帧数；
@@ -681,9 +895,16 @@ def run_file_pipeline(src_video: str, params: Dict[str, Any], advanced: bool,
     tmpdir = out_path + ".chunks"
     os.makedirs(tmpdir, exist_ok=True)
     chunk_paths = []
-    pipe = FlashVSRPipe(params, advanced)
+    pipe = None
     try:
+        pipe = FlashVSRPipe(params, advanced)
+        if reporter is not None:
+            reporter.start(total_chunks=len(chunks), total_frames=total,
+                           src_res=f"{w}x{h}", video_before=src_video)
         for idx, (s, e) in enumerate(chunks):
+            if reporter is not None and _interrupted():
+                reporter.cancelled()
+                _raise_cancel()
             arr = read_frames_ffmpeg(src_video, s, e, ff)  # uint8 RGB [L,H,W,3]
             # 转 ComfyUI 格式张量 [L,H,W,3] float32 [0,1]
             cf = torch.from_numpy(arr.astype("float32") / 255.0)
@@ -694,18 +915,39 @@ def run_file_pipeline(src_video: str, params: Dict[str, Any], advanced: bool,
             write_frames_ffmpeg(up8, ow, oh, fps, cp, crf=crf, ff=ff)
             chunk_paths.append(cp)
             log(f"[Trunk] 块 {idx+1}/{len(chunks)} 完成 -> {os.path.basename(cp)}")
+            if reporter is not None:
+                # Convention B：除首块外各块丢弃头部 overlap 帧，故有效帧数需扣除
+                eff = (e - s) - (overlap if s > 0 else 0)
+                reporter.chunk_done(eff)
+        if reporter is not None:
+            reporter.merge()
+        log("[Trunk] 合并分块（重叠去重 + 复用源音频）...")
+        merge_chunk_videos(chunk_paths, out_path, overlap,
+                           source_audio_path=src_video, fps=fps, crf=crf, ff=ff,
+                           reporter=reporter)
+        # 清理临时 chunk（失败不致命，但需上报以便排错）
+        try:
+            for p in chunk_paths:
+                os.remove(p)
+            os.rmdir(tmpdir)
+        except Exception as e:  # noqa: BLE001
+            _warn(f"清理临时 chunk 失败（可手动删除）: {tmpdir} ({e})")
+        if reporter is not None:
+            reporter.done(out_res=f"{ow}x{oh}", video_after=out_path)
+        log(f"[Trunk] 完成: {out_path}")
+        return out_path
+    except Exception as e:
+        try:
+            if reporter is not None:
+                if _interrupted():
+                    reporter.cancelled()
+                else:
+                    reporter.failed(str(e)[:300])
+        except Exception:
+            pass
+        if _interrupted():
+            _raise_cancel()
+        raise
     finally:
-        pipe.close()
-
-    log("[Trunk] 合并分块（重叠去重 + 复用源音频）...")
-    merge_chunk_videos(chunk_paths, out_path, overlap,
-                       source_audio_path=src_video, fps=fps, crf=crf, ff=ff)
-    # 清理临时 chunk（失败不致命，但需上报以便排错）
-    try:
-        for p in chunk_paths:
-            os.remove(p)
-        os.rmdir(tmpdir)
-    except Exception as e:  # noqa: BLE001
-        _warn(f"清理临时 chunk 失败（可手动删除）: {tmpdir} ({e})")
-    log(f"[Trunk] 完成: {out_path}")
-    return out_path
+        if pipe is not None:
+            pipe.close()

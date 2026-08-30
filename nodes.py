@@ -22,10 +22,68 @@ Comfy-FlashVSR-Trunk · ComfyUI 节点定义
 
 import os
 import glob
+import uuid
+import threading
 
 import torch
 
 from . import trunk_core as tc
+
+
+# ===========================================================================
+# 视频对比区：安全服务路由（仅允许本插件运行期间登记过的视频文件）
+# ===========================================================================
+ALLOWED_VIDEOS: set = set()
+_ALLOWED_LOCK = threading.Lock()
+_ROUTE_REGISTERED = False
+
+
+def register_served_video(path: str) -> None:
+    """登记一个视频绝对路径，使其可通过 /flashvsr_trunk_video 路由被前端播放。
+
+    仅登记「源视频」与「本次输出视频」，避免任意文件泄露（P4 安全观）。
+    若路由尚未注册（模块导入时 PromptServer 尚未就绪），在运行时（本函数被调用时）重试。
+    """
+    if path:
+        with _ALLOWED_LOCK:
+            ALLOWED_VIDEOS.add(os.path.abspath(path))
+    global _ROUTE_REGISTERED
+    if not _ROUTE_REGISTERED:
+        _register_serve_route()
+
+
+def _register_serve_route() -> None:
+    global _ROUTE_REGISTERED
+    try:
+        try:
+            from server import PromptServer  # 旧版 ComfyUI
+        except Exception:
+            from comfy.server import PromptServer  # 新版 ComfyUI
+    except Exception:
+        # 非 ComfyUI 环境（离线/测试）：静默跳过，不告警
+        return
+    try:
+        from aiohttp import web
+        server = PromptServer.instance
+        if server is None or getattr(server, "_flashvsr_trunk_route", False):
+            return
+        async def _serve(request):
+            p = request.query.get("f", "")
+            p = os.path.abspath(p)
+            with _ALLOWED_LOCK:
+                ok = p in ALLOWED_VIDEOS
+            if not ok or not os.path.isfile(p):
+                return web.Response(status=403, text="forbidden")
+            # web.FileResponse 自动支持 HTTP Range，前端 <video> 可正常拖动进度
+            return web.FileResponse(p)
+        server.app.add_routes([web.get("/flashvsr_trunk_video", _serve)])
+        server._flashvsr_trunk_route = True
+        _ROUTE_REGISTERED = True
+    except Exception as e:  # noqa: BLE001
+        tc._warn(f"FlashVSR-Trunk 视频服务路由注册失败（对比区将不可用）: {e}")
+
+
+_register_serve_route()
 
 
 # ===========================================================================
@@ -66,14 +124,18 @@ def _run_file_pipeline_node(src_video, params, advanced, *,
     """
     if not src_video or not os.path.exists(src_video):
         raise FileNotFoundError(f"源视频不存在: {src_video}")
-    # 输出路径规范化 + 输出名防穿越（P4#15）
+    # 输出路径规范化 + 输出名防穿越（P4#15）+ 文件名追加秒级时间戳
     out_dir = tc.resolve_output_dir(
         output_dir, os.path.dirname(os.path.abspath(src_video)))
     name = tc.safe_output_name(output_name, default_output_name)
-    out_path = os.path.join(out_dir, f"{name}.mp4")
+    out_path = tc.timestamped_output_path(out_dir, name, ".mp4")
+    register_served_video(src_video)
+    register_served_video(out_path)
+    reporter = tc.ProgressReporter(node="FlashVSR_Trunk", run_id=uuid.uuid4().hex)
     final = tc.run_file_pipeline(
         src_video, params, advanced=advanced, out_path=out_path,
         chunk_size=chunk_size, overlap=overlap, fps=(fps or None), crf=crf,
+        reporter=reporter,
     )
     preview = _preview_from_video(final, fps or None)
     return final, preview
@@ -191,8 +253,10 @@ class FlashVSR_Trunk_Frames:
 
     def upscale(self, frames, preset, scale, chunk_size, overlap, unload_model, seed, audio=None):
         params = tc.basic_params(preset, scale, unload_model, seed)
+        reporter = tc.ProgressReporter(node="FlashVSR_Trunk_Frames", run_id=uuid.uuid4().hex)
         out = tc.upscale_frames_chunked(
-            frames, params, advanced=False, chunk_size=chunk_size, overlap=overlap)
+            frames, params, advanced=False, chunk_size=chunk_size, overlap=overlap,
+            reporter=reporter)
         return (out, audio)
 
 
@@ -227,14 +291,25 @@ class FlashVSR_Trunk_Merge:
         files = sorted(glob.glob(os.path.join(chunk_dir, name_pattern)))
         if not files:
             raise FileNotFoundError(f"未找到匹配的分块: {os.path.join(chunk_dir, name_pattern)}")
-        # 输出路径规范化 + 输出名防穿越（P4#15）
+        # 输出路径规范化 + 输出名防穿越（P4#15）+ 文件名追加秒级时间戳
         out_dir = tc.resolve_output_dir(output_dir, os.path.abspath(chunk_dir))
         name = tc.safe_output_name(output_name, "FlashVSR_final")
-        out_path = os.path.join(out_dir, f"{name}.mp4")
+        out_path = tc.timestamped_output_path(out_dir, name, ".mp4")
         src = source_video.strip() if source_video and os.path.exists(source_video) else None
-        final = tc.merge_chunk_videos(
-            files, out_path, overlap, source_audio_path=src,
-            fps=(fps or None), crf=crf)
+        if src:
+            register_served_video(src)
+        register_served_video(out_path)
+        reporter = tc.ProgressReporter(node="FlashVSR_Trunk_Merge", run_id=uuid.uuid4().hex)
+        try:
+            reporter.start(total_chunks=len(files), total_frames=len(files),
+                          video_before=(src or ""), video_after=out_path)
+            final = tc.merge_chunk_videos(
+                files, out_path, overlap, source_audio_path=src,
+                fps=(fps or None), crf=crf, reporter=reporter, count_as_chunks=True)
+            reporter.done(video_after=out_path)
+        except Exception as e:
+            reporter.failed(str(e)[:300])
+            raise
         return (final,)
 
 

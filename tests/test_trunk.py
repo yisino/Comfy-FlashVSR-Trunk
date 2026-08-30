@@ -706,6 +706,123 @@ def test_j8_install_pip_failure_is_fatal():
 
 
 # ===========================================================================
+# K. 实时进度上报 + 时间戳命名（新增展示面板特性）
+# ===========================================================================
+class _FakeServer:
+    def __init__(self) -> None:
+        self.sent: list = []
+
+    def send_json(self, msg) -> None:  # noqa: ANN001
+        self.sent.append(msg)
+
+
+def test_k1_timestamp_format_and_safe():
+    # timestamped_output_path 假定 base_name 已由 safe_output_name 规范化
+    # （与节点内调用顺序一致：先 safe_output_name 再 timestamped_output_path）
+    safe = tc.safe_output_name
+    with tempfile.TemporaryDirectory() as d:
+        p = tc.timestamped_output_path(d, safe("my video"), ".mp4")
+        base = os.path.basename(p)
+        # 基名保留（空格正常），并追加 _YYYYMMDD_HHMMSS
+        assert base.startswith("my video_"), base
+        assert base.endswith(".mp4"), base
+        stamp = base[len("my video_"):-len(".mp4")]
+        assert len(stamp) == 15 and stamp[8] == "_", stamp  # YYYYMMDD_HHMMSS
+        # 非法字符基名：safe_output_name 已剔除，时间戳仍追加
+        p2 = tc.timestamped_output_path(d, safe('a/b:c*'), ".mp4")
+        b2 = os.path.basename(p2)
+        assert "/" not in b2 and ":" not in b2 and "*" not in b2
+        assert "_" in b2
+
+
+def test_k2_timestamp_no_overwrite():
+    with tempfile.TemporaryDirectory() as d:
+        p = tc.timestamped_output_path(d, "x", ".mp4")
+        open(p, "w").close()
+        p2 = tc.timestamped_output_path(d, "x", ".mp4")
+        assert p2 != p and p2.endswith(".mp4")
+        assert os.path.basename(p2).startswith("x_")
+
+
+def test_k3_timestamp_preserves_extension():
+    with tempfile.TemporaryDirectory() as d:
+        p = tc.timestamped_output_path(d, "name", ".mov")
+        assert p.endswith(".mov")
+
+
+def test_k4_reporter_stats_without_server():
+    """无 PromptServer 环境：不抛错、仅维护统计（离线/测试降级）。"""
+    r = tc.ProgressReporter(node="T", run_id="rid")
+    r.start(total_chunks=3, total_frames=120, src_res="1920x1080",
+            video_before="/a/b.mp4")
+    assert r.total_chunks == 3 and r.total_frames == 120
+    r.chunk_done(40)
+    r.chunk_done(40)
+    assert r.done_chunks == 2 and r.processed_frames == 80
+    r.done(out_res="7680x4320", video_after="/a/c.mp4")
+    assert r.out_res == "7680x4320"
+
+
+def test_k5_reporter_message_shape():
+    srv = _FakeServer()
+    r = tc.ProgressReporter(node="T", run_id="rid")
+    r._server = srv  # 绕过惰性探测，直接注入假 server
+    r.start(total_chunks=2, total_frames=100)
+    r.chunk_done(50)
+    r.done(out_res="x", video_after="/v.mp4")
+    types = [m["type"] for m in srv.sent]
+    assert types == ["flashvsr_trunk_progress"] * 3, types
+    running = srv.sent[0]["data"]
+    assert running["status"] == "running"
+    assert running["total_chunks"] == 2 and running["total_frames"] == 100
+    assert running["run_id"] == "rid"
+    done = srv.sent[-1]["data"]
+    assert done["status"] == "done" and done["video_after"] == "/v.mp4"
+
+
+def test_k6_merge_progress_count_as_chunks():
+    """合并节点路径：count_as_chunks=True 时每段推进 done_chunks。"""
+    try:
+        ff = tc.get_ffmpeg()
+    except Exception:
+        raise _Skip("ffmpeg 不可用，跳过合并进度集成测试")
+    with tempfile.TemporaryDirectory() as d:
+        v1 = os.path.join(d, "c1.mp4")
+        v2 = os.path.join(d, "c2.mp4")
+        for v in (v1, v2):
+            subprocess.run([ff, "-y", "-hide_banner", "-f", "lavfi",
+                            "-i", "testsrc=size=32x32:rate=1:duration=5",
+                            "-pix_fmt", "yuv420p", v], check=True, capture_output=True)
+        out = os.path.join(d, "merged.mp4")
+
+        class _R:
+            def __init__(self):
+                self.done_chunks = 0
+                self.processed_frames = 0
+                self.status = None
+
+            def start(self, **kw): pass
+            def chunk_done(self, n):
+                self.done_chunks += 1
+                self.processed_frames += n
+
+            def done(self, **kw): self.status = "done"
+            def failed(self, e): self.status = "failed"
+            def cancelled(self): self.status = "cancelled"
+            def merge(self): pass
+            def _emit(self, *a, **k): pass
+
+        rep = _R()
+        res = tc.merge_chunk_videos([v1, v2], out, overlap=0, reporter=rep,
+                                    count_as_chunks=True)
+        assert os.path.isfile(res), "合并产物缺失"
+        assert rep.done_chunks == 2, rep.done_chunks
+        # 与节点内一致：done() 由调用方（Merge 节点）在合并成功后调用
+        rep.done()
+        assert rep.status == "done"
+
+
+# ===========================================================================
 # 独立运行器（无需 pytest）
 # ===========================================================================
 def _main():
