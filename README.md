@@ -28,30 +28,40 @@
 
 ## 安装
 
-### 方式 A：复制 / git clone 到 custom_nodes
+### 方式 A：ComfyUI Manager 一键安装（推荐）
+
+ComfyUI Manager → **Install Custom Nodes** → **Install via Git URL** → 粘贴本仓库地址：
+
+```
+https://gitee.com/simino/Comfy-FlashVSR-Trunk
+# 或 https://github.com/yisino/Comfy-FlashVSR-Trunk
+# 或 https://codeup.aliyun.com/5f28c467769820a3e817fc05/yisino/Comfy-FlashVSR-Trunk
+```
+
+Manager 会克隆本仓库、自动执行 `install.py`（`install.py` 会装好本插件依赖，并**自动克隆 peer 依赖 `ComfyUI-FlashVSR`** 到同级 `custom_nodes/`，跳过 torch 等 ComfyUI 自带项）。
+
+> 想让节点出现在 Manager 的「可搜索列表」中（而非仅 Git URL 安装），需把本仓库提交到
+> ComfyUI Manager 的 custom-node-list（提 PR 到 `ComfyUI-Manager/custom-node-list`），
+> 或在本仓库根目录放置符合规范的 `node.json`（已带）。
+
+### 方式 B：手动 git clone
 
 ```bash
-# 进入你的 ComfyUI custom_nodes 目录
 cd /path/to/ComfyUI/custom_nodes
 git clone <本仓库地址> Comfy-FlashVSR-Trunk
-# 或者把本文件夹整个拷贝过去，目录名保持 Comfy-FlashVSR-Trunk
+# 安装依赖（可选，install.py 已自动处理）
+#   cd Comfy-FlashVSR-Trunk && pip install -r requirements.txt
+#   若未用 Manager，请手动安装 peer 依赖：
+#   git clone https://github.com/1038lab/ComfyUI-FlashVSR ../ComfyUI-FlashVSR
 ```
 
-### 方式 B：ComfyUI Manager
+### 依赖说明
 
-Manager → Install Custom Nodes → 搜索 `Comfy-FlashVSR-Trunk`（发布后可用）。
-
-### ⚠️ 前置依赖（必须）
-
-本插件 **复用** `ComfyUI-FlashVSR` 的模型与推理代码，请先安装它：
-
-```bash
-cd /path/to/ComfyUI/custom_nodes
-git clone https://github.com/1038lab/ComfyUI-FlashVSR
-```
-
-其余依赖（`torch` / `numpy`）由 ComfyUI 环境自带；`imageio-ffmpeg` 用于分块  
-合并（与 VHS 共用同一 ffmpeg 二进制）。
+| 依赖 | 类型 | 说明 |
+|------|------|------|
+| `imageio-ffmpeg` | pip（本插件） | 分块视频合并复用其内置 ffmpeg（与 VHS 一致） |
+| `ComfyUI-FlashVSR` | peer（custom node） | **复用其模型与推理代码**；`install.py` 自动克隆，无需手动 |
+| `torch` / `numpy` | ComfyUI 自带 | 不重装，避免破坏 ComfyUI venv |
 
 安装后 **重启 ComfyUI**，节点会出现在 `🧪AILab/⚡FlashVSR/Trunk` 分类下。
 
@@ -119,7 +129,8 @@ Comfy-FlashVSR-Trunk/
 ├── __init__.py              # 节点注册
 ├── nodes.py                 # 4 个节点定义
 ├── trunk_core.py            # 核心：分块规划 / FlashVSR 调用 / ffmpeg 合并与视频 IO
-├── requirements.txt         # 依赖（前置：ComfyUI-FlashVSR）
+├── requirements.txt         # 本插件 pip 依赖（imageio-ffmpeg）
+├── install.py               # ComfyUI Manager 安装钩子：装依赖 + 自动克隆 peer(ComfyUI-FlashVSR)
 ├── node.json                # ComfyUI Manager 元数据
 ├── README.md
 ├── LICENSE                  # MIT
