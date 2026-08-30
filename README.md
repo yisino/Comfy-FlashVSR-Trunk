@@ -134,6 +134,9 @@ Comfy-FlashVSR-Trunk/
 ├── node.json                # ComfyUI Manager 元数据
 ├── README.md
 ├── LICENSE                  # MIT
+├── tests/
+│   └── test_trunk.py        # 测试套件（42 项，无需 pytest 即可运行）
+├── .github/workflows/ci.yml # CI：Python 3.11/3.12 跑测试 + 语法检查
 ├── publish.ps1 / publish.sh # 一键多平台同步（含 -Deploy 部署到本地 ComfyUI）
 ├── example_workflows/
 │   └── FlashVSR_Trunk_demo.json   # 即插即用示例（VHS → Trunk_Frames → VHS）
@@ -165,6 +168,29 @@ Comfy-FlashVSR-Trunk/
 > 然后跑上面的脚本即可。分组/命名空间在脚本顶部的 `$remotes` / 变量里改。
 
 ---
+
+## 测试
+
+测试套件位于 `tests/test_trunk.py`，共 **42 项**（覆盖节点契约 / 分块规划 / 模块
+解析 / ffmpeg IO / 端到端合并 / 张量重建 / 参数映射 / 异常边界 / type hints）。
+**不依赖 GPU 与真实模型推理**，可在任意环境运行：
+
+```bash
+# 方式 A：直接运行（无需 pytest）
+python tests/test_trunk.py
+
+# 方式 B：pytest
+python -m pytest tests/ -v
+```
+
+默认从 `D:/Comfy-Desktop/.../custom_nodes` 加载插件；其他环境用环境变量指定：
+
+```bash
+COMFY_CUSTOM_NODES=/path/to/ComfyUI/custom_nodes python tests/test_trunk.py
+```
+
+> 前提：需已安装 `ComfyUI-FlashVSR`（peer 依赖，测试 C 组会校验其可发现性）
+> 与 `ffmpeg`（`imageio-ffmpeg` 或系统 ffmpeg）。CI 会自动克隆 peer 并安装 ffmpeg。
 
 ## 卸载
 

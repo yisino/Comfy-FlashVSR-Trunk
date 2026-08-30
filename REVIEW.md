@@ -180,14 +180,28 @@ node.json / README / LICENSE / publish.*
 | 9 | 缺 type hints | 全文件 | 函数签名加 `-> ...` 与参数类型，IDE 友好；非阻塞 |
 | 10 | `import_flashvsr` 第三步文件系统扫描做真实 import | `trunk_core.py:78-90` | 改为「只检查文件存在、记录路径，留给运行时决定」—— 避免安装/校验阶段触发重模块加载 |
 
-### P3 — 测试与 CI（提升可维护性）
+### P3 — 测试与 CI（提升可维护性）— ✅ **已完成**
 
-| # | 项 | 位置 | 建议 |
+| # | 项 | 位置 | 状态 |
 |---|---|---|---|
-| 11 | `validate_trunk.py` 被 `.gitignore` 排除 | 项目根 | 移到 `tests/test_trunk.py`，纳入 CI |
-| 12 | 缺 CI | 仓库根 | 加 `.github/workflows/ci.yml`：`python -m pytest tests/ -v` |
-| 13 | 缺针对异常场景的测试 | — | 增加：不规则 chunk 顺序 / 损坏分块 / overlap=0 / fps=0 / 输出目录不存在 等边界 |
-| 14 | 缺针对 `merge_chunk_videos` 的真实音频测试 | — | 当前 source_audio_path=None 路径已验证；带音频路径只验证代码存在性，需构造一个含音频的源视频测试 |
+| 11 | `validate_trunk.py` 被 `.gitignore` 排除 | 项目根 | ✅ 新增 `tests/test_trunk.py`（42 项，可独立运行无需 pytest）|
+| 12 | 缺 CI | 仓库根 | ✅ 新增 `.github/workflows/ci.yml`（Python 3.11/3.12 双版本跑测试 + `compileall` 语法检查）|
+| 13 | 缺针对异常场景的测试 | — | ✅ 已覆盖：overlap=0 / 单块 / 大 overlap / 极小视频 / 缺源视频 / 缺分块目录 / 无匹配分块 / 帧数不足 / ffmpeg 失败路径 |
+| 14 | 缺针对 `merge_chunk_videos` 的真实音频测试 | — | ✅ `test_e5` 构造带 AAC 音轨源，验证合并后帧数=60 且输出含 Audio 流 |
+
+**测试分组（42 项，全绿）**：
+
+| 组 | 覆盖内容 | 项数 |
+|---|---|---|
+| A | 节点注册 + ComfyUI 契约 + **签名与 INPUT_TYPES 对齐** | 5 |
+| B | plan_chunks 覆盖/重叠/最小长度/退化/无死循环/边界 | 8 |
+| C | 模块解析 + **P2.10 路径发现不触发重导入** | 3 |
+| D | ffmpeg 定位 + 探测 + 读写往返 | 3 |
+| E | 端到端合并（overlap 8/0/单块/大 overlap/**带音频**）| 5 |
+| F | 张量重建 Convention B + **逐帧严格递增校验** | 4 |
+| G | 参数构造 + 正反映射一致性 | 5 |
+| H | 异常边界 | 6 |
+| I | type hints 完整性（P2.9）| 3 |
 
 ### P4 — 安全 / 健壮性（防御性改进）
 
@@ -207,13 +221,37 @@ node.json / README / LICENSE / publish.*
 
 ---
 
-## 5. 总结
+## 5. 改进落实情况（2026-08-30 更新）
 
-这是一个**达成度高、代码质量中上、维护性可控**的 ComfyUI 扩展插件：
+| 档 | 内容 | 状态 | 提交 |
+|---|---|---|---|
+| **P1** | `close()` 行为与命名不符 / MIN_FRAMES 注释 / 清理 silent-fail / ffmpeg stderr 透传 / `_EFFICIENT_ATTRS` 版本注释 | ✅ 5/5 | `ae8a450` |
+| **P2.1-8** | 公共 INPUT_TYPES schema / `_run_file_pipeline_node` / 显式反向映射 | ✅ | `ae8a450` |
+| **P2.9** | 全面 type hints（15 个公共函数 + 3 个类方法）| ✅ | `d7ab02d` |
+| **P2.10** | 路径发现与重导入解耦（`_ensure_flashvsr_on_path`）| ✅ | `d7ab02d` |
+| **P3** | 测试套件（42 项）+ GitHub Actions CI | ✅ 4/4 | 本次 |
+| **P4** | `output_dir` 路径校验 / install 缺依赖升级 ERROR / SPDX 头 | ⏭ 待办 | — |
+| **P5** | 中文 README / legacy 说明 / make_demo.py 入仓 | ⏭ 待办 | — |
+
+**P1 + P2 + P3 全部完成**，剩余 P4/P5 均为低风险的合规与文档项。
+
+**完整测试结果：42/42 PASS**（详见 §4 P3 表格与 `tests/test_trunk.py`）。
+
+## 6. 总结（更新）
+
+这是一个**达成度高、代码质量 A-、测试完备**的 ComfyUI 扩展插件：
 - ✅ 核心痛点（整段 4x OOM）已根治
 - ✅ 4 个节点覆盖文件 / 张量 / 合并三场景
 - ✅ 一键安装 + peer 自动克隆到位
-- ✅ 多平台发布已落地并一致
-- ⚠️ 主要待办：清理路径 silent-fail 改成 WARN 日志；`FlashVSRPipe.close()` 行为与命名不符；节点类 INPUT_TYPES 抽公共 schema 减重
+- ✅ 多平台发布已落地并一致（Gitee / GitHub / Codeup）
+- ✅ **42 项自动化测试全绿 + CI 覆盖 Python 3.11/3.12**
+- ✅ P1/P2/P3 审查改进全部落实
+- ⏭ 剩余 P4（路径校验 / install 错误处理 / SPDX）与 P5（文档）为低优先级合规项
 
-**优先修 P1（5 项，约 30 行改动）+ P2#6/#7（结构去重，约 50 行）即可达到 A- 水平**。其他项可在后续迭代中处理。
+**审查过程中发现并修复的真实缺陷（非风格问题）**：
+
+1. `plan_chunks` **死循环** —— `e>=total` 时 `s=total-overlap` 仍 `<total`，任意真实视频都会让 ComfyUI 卡死
+2. `probe_frames` **解析崩溃** —— 多位数帧数（`frame= 120 fps=...`）抛 ValueError
+3. `merge_chunk_videos` — `-vsync 0` 与 `-r` 冲突崩溃 + `select` 边界多丢 4 帧（120→116）
+4. `FlashVSRPipe.close()` **行为与命名不符** —— 调用不存在的 `peer.clean_vram()`，实际未清理 VRAM
+5. `import_flashvsr` 缺 return type hint —— 唯一一处 P2.9 漏网（由测试 I1 捕获）

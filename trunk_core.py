@@ -28,6 +28,7 @@ import shutil
 import subprocess
 import importlib
 import importlib.util
+from types import ModuleType
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 
@@ -114,7 +115,7 @@ def _ensure_flashvsr_on_path() -> Optional[str]:
     return None
 
 
-def import_flashvsr():
+def import_flashvsr() -> ModuleType:
     """导入已安装的 ComfyUI-FlashVSR 的 AILab_FlashVSR 模块。
 
     Returns:

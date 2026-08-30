@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Test (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+
+    steps:
+      - name: Checkout plugin
+        uses: actions/checkout@v4
+        with:
+          path: custom_nodes/Comfy-FlashVSR-Trunk
+
+      - name: Clone peer dependency (ComfyUI-FlashVSR)
+        run: git clone --depth 1 https://github.com/1038lab/ComfyUI-FlashVSR custom_nodes/ComfyUI-FlashVSR
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install ffmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # CPU 版 torch 即可：本测试套件不依赖 GPU / 真实模型推理
+          pip install --index-url https://download.pytorch.org/whl/cpu torch
+          pip install -r custom_nodes/Comfy-FlashVSR-Trunk/requirements.txt
+
+      - name: Run test suite
+        env:
+          COMFY_CUSTOM_NODES: ${{ github.workspace }}/custom_nodes
+        run: python custom_nodes/Comfy-FlashVSR-Trunk/tests/test_trunk.py
+
+      - name: Syntax check (install.py / nodes.py / trunk_core.py)
+        run: |
+          cd custom_nodes/Comfy-FlashVSR-Trunk
+          python -m compileall -q install.py nodes.py trunk_core.py __init__.py
