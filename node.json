@@ -1,9 +1,9 @@
 {
   "name": "Comfy-FlashVSR-Trunk",
   "version": "1.0.0",
-  "author": "yisino",
+  "author": "simino",
   "description": "FlashVSR 长视频 4x 分块超分流水线（RAM-safe）ComfyUI 扩展插件：时间分块 + 重叠上采样 + 自动合并。",
-  "repository": "https://github.com/yisino/Comfy-FlashVSR-Trunk",
+  "repository": "https://gitee.com/simino/Comfy-FlashVSR-Trunk",
   "dependencies": [
     "ComfyUI-FlashVSR"
   ],
