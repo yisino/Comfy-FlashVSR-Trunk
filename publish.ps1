@@ -22,7 +22,7 @@ $remotes = @{
   # Gitee（替换原内网 GitLab）：命名空间 simino（本机 id_ed25519 已授权）
   origin = "git@gitee.com:simino/$repo.git"
   github = "git@github.com:yisino/$repo.git"
-  codeup = "git@codeup.aliyun.com:5f28c467769820a3e817fc05/$repo.git"
+  codeup = "git@codeup.aliyun.com:5f28c467769820a3e817fc05/yisino/$repo.git"
 }
 
 # 幂等设置 remote

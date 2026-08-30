@@ -61,7 +61,7 @@ git clone https://github.com/1038lab/ComfyUI-FlashVSR
 | ----------- | ------------------------------------------------------------------------- |
 | Gitee       | `git@gitee.com:simino/Comfy-FlashVSR-Trunk.git`                           |
 | GitHub      | `git@github.com:yisino/Comfy-FlashVSR-Trunk.git`                          |
-| Codeup（阿里云） | `git@codeup.aliyun.com:5f28c467769820a3e817fc05/Comfy-FlashVSR-Trunk.git` |
+| Codeup（阿里云） | `git@codeup.aliyun.com:5f28c467769820a3e817fc05/yisino/Comfy-FlashVSR-Trunk.git` |
 
 > Gitee 命名空间默认 `simino`（本机 `id_ed25519` 已授权），如需改命名空间改 `publish.ps1` / `publish.sh` 里的 URL 即可。
 

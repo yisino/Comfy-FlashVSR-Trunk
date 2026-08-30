@@ -9,7 +9,7 @@ REPO="Comfy-FlashVSR-Trunk"
 # remote 配置（命名空间改动改这里）
 ORIGIN="git@gitee.com:simino/${REPO}.git"   # Gitee，替换原内网 GitLab（命名空间 simino）
 GITHUB="git@github.com:yisino/${REPO}.git"
-CODEUP="git@codeup.aliyun.com:5f28c467769820a3e817fc05/${REPO}.git"
+CODEUP="git@codeup.aliyun.com:5f28c467769820a3e817fc05/yisino/${REPO}.git"
 COMFY_CUSTOM_NODES="${COMFY_CUSTOM_NODES:-$HOME/ComfyUI/custom_nodes}"
 
 add_remote() {
