@@ -203,21 +203,25 @@ node.json / README / LICENSE / publish.*
 | H | 异常边界 | 6 |
 | I | type hints 完整性（P2.9）| 3 |
 
-### P4 — 安全 / 健壮性（防御性改进）
+### P4 — 安全 / 健壮性（防御性改进）— ✅ **已完成**
 
-| # | 项 | 位置 | 建议 |
+| # | 项 | 位置 | 落实 |
 |---|---|---|---|
-| 15 | `output_dir` 用户输入未规范化 | `nodes.py:63, 123, 207` | 加 `os.path.abspath` 解析，并校验在 ComfyUI `output/` 子树内（防路径穿越）|
-| 16 | `install.py` 中 `pip install -r requirements.txt` 失败只 WARN | `install.py:48-55` | 升级为 ERROR（`raise` 或 `sys.exit(1)`），避免静默缺依赖 |
-| 17 | 缺 SPDX License 头 | 所有 .py | 文件首加 `# SPDX-License-Identifier: MIT` |
+| 15 | 输出路径未规范化 / **`output_name` 可路径穿越** | `nodes.py` | ✅ 新增 `trunk_core.safe_output_name()`（剥离目录语义/盘符/非法字符，空值回退，截断 120）+ `resolve_output_dir()`（abspath + expanduser + 自动建目录）；4 个落盘节点全部改用 |
+| 16 | `install.py` pip 失败只 WARN | `install.py:48-55` | ✅ `pip_install_requirements` 检查 returncode，失败抛 RuntimeError（点名 `imageio-ffmpeg`）；`__main__` 捕获后 `sys.exit(1)`，让 Manager 识别为安装失败。**peer 克隆失败仍为告警**（可手动补装，属可恢复项）|
+| 17 | 缺 SPDX License 头 | 所有 .py | ✅ 5 个 Python 文件（`__init__`/`nodes`/`trunk_core`/`install`/`tests`）均加 `# SPDX-License-Identifier: MIT` + 版权行 |
 
-### P5 — 文档 / 生态（锦上添花）
+> **第 15 项的真实风险**：`output_name` 被直接拼进 `os.path.join(out_dir, name + ".mp4")`，
+> 用户填入 `../../evil` 即写穿 `out_dir`。原先只校验了 `output_dir` 却漏了 `output_name`，
+> 本轮不仅补上，还加了 `test_j6` 端到端断言「最终路径必须仍落在 out_dir 内」。
 
-| # | 项 | 位置 | 建议 |
+### P5 — 文档 / 生态（锦上添花）— ✅ **已完成**
+
+| # | 项 | 位置 | 落实 |
 |---|---|---|---|
-| 18 | `legacy/` 占仓库较大体积但 README 未说明 | `README.md:140-142` | 加一行「已迁移至新版，legacy 仅作历史参考」|
-| 19 | `example_workflows/` 生成脚本 `make_demo.py` 不在仓库 | 项目根 | 移到 `scripts/` 方便后续同步更新 |
-| 20 | README 缺中文版 | — | 加 `README_ZH.md`，国际用户友好 |
+| 18 | `legacy/` 未说明 | `README.md` | ✅ 目录结构加 ⚠️ 标记 + 独立说明段（历史归档、已被取代、`merge_overlap.py` 的 bug 已修正、删除无影响）|
+| 19 | `make_demo.py` 不在仓库 | 项目根 | ✅ 移入 `scripts/make_demo.py` 并改为**路径可移植**（以脚本位置推导仓库根，不再硬编码绝对路径）；重跑验证生成结果与仓库内示例**逐字节一致** |
+| 20 | 缺英文版说明 | — | ✅ 新增 `README_EN.md`（README.md 本身即中文，故补英文版而非中文版），两版互链 |
 
 ---
 
@@ -230,23 +234,23 @@ node.json / README / LICENSE / publish.*
 | **P2.9** | 全面 type hints（15 个公共函数 + 3 个类方法）| ✅ | `d7ab02d` |
 | **P2.10** | 路径发现与重导入解耦（`_ensure_flashvsr_on_path`）| ✅ | `d7ab02d` |
 | **P3** | 测试套件（42 项）+ GitHub Actions CI | ✅ 4/4 | 本次 |
-| **P4** | `output_dir` 路径校验 / install 缺依赖升级 ERROR / SPDX 头 | ⏭ 待办 | — |
-| **P5** | 中文 README / legacy 说明 / make_demo.py 入仓 | ⏭ 待办 | — |
+| **P4** | 输出名防穿越 + 目录规范化 / install 缺依赖升级 ERROR / SPDX 头 | ✅ 3/3 | 本次 |
+| **P5** | legacy 说明 / `make_demo.py` 入仓 / 英文 README | ✅ 3/3 | 本次 |
 
-**P1 + P2 + P3 全部完成**，剩余 P4/P5 均为低风险的合规与文档项。
+**P1 + P2 + P3 + P4 + P5 全部完成**，审查改进项清零。
 
-**完整测试结果：42/42 PASS**（详见 §4 P3 表格与 `tests/test_trunk.py`）。
+**完整测试结果：50/50 PASS**（10 组，详见 §4 P3 表格与 `tests/test_trunk.py`）。
 
-## 6. 总结（更新）
+## 6. 总结（终版）
 
-这是一个**达成度高、代码质量 A-、测试完备**的 ComfyUI 扩展插件：
+这是一个**达成度高、代码质量 A、测试完备、合规项齐备**的 ComfyUI 扩展插件：
 - ✅ 核心痛点（整段 4x OOM）已根治
 - ✅ 4 个节点覆盖文件 / 张量 / 合并三场景
 - ✅ 一键安装 + peer 自动克隆到位
 - ✅ 多平台发布已落地并一致（Gitee / GitHub / Codeup）
-- ✅ **42 项自动化测试全绿 + CI 覆盖 Python 3.11/3.12**
-- ✅ P1/P2/P3 审查改进全部落实
-- ⏭ 剩余 P4（路径校验 / install 错误处理 / SPDX）与 P5（文档）为低优先级合规项
+- ✅ **50 项自动化测试全绿 + CI 覆盖 Python 3.11/3.12**
+- ✅ **审查改进项 P1/P2/P3/P4/P5 全部清零**
+- ✅ SPDX 许可头齐备、中英文文档双全、示例工作流可复现生成
 
 **审查过程中发现并修复的真实缺陷（非风格问题）**：
 

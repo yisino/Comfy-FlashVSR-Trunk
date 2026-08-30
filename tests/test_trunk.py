@@ -1,5 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Comfy-FlashVSR-Trunk contributors
 """
 Comfy-FlashVSR-Trunk 测试套件
 =============================
@@ -546,6 +548,95 @@ def test_i2_pipe_methods_have_hints():
 def test_i3_warn_helper():
     """_warn 存在且可调用（清理路径告警通道）。"""
     assert callable(getattr(tc, "_warn", None))
+
+
+# ===========================================================================
+# J. 路径安全（P4#15：输出名防穿越 + 输出目录规范化）
+# ===========================================================================
+def test_j1_safe_output_name_plain():
+    assert tc.safe_output_name("my_video", "fb") == "my_video"
+    assert tc.safe_output_name("  spaced  ", "fb") == "spaced"
+
+
+def test_j2_safe_output_name_blocks_traversal():
+    """核心威胁：output_name 被拼进路径，绝不能带出目录语义。"""
+    for evil in ("../../etc/passwd", "..\\..\\evil", "../../evil",
+                 "....//evil", "a/../../b"):
+        got = tc.safe_output_name(evil, "fb")
+        assert "/" not in got and "\\" not in got and got != "..", \
+            f"{evil!r} -> {got!r} 仍含路径语义"
+
+
+def test_j3_safe_output_name_blocks_windows_drive():
+    got = tc.safe_output_name("C:\\Windows\\System32\\evil", "fb")
+    assert ":" not in got and "\\" not in got, got
+    assert got == "evil", got
+
+
+def test_j4_safe_output_name_strips_invalid_chars():
+    got = tc.safe_output_name('a<b>c:"d"/e\\f|g?h*i', "fb")
+    for ch in '<>:"\\/|?*':
+        assert ch not in got, f"非法字符 {ch!r} 残留: {got!r}"
+
+
+def test_j5_safe_output_name_fallback_and_length():
+    assert tc.safe_output_name("", "fallback") == "fallback"
+    assert tc.safe_output_name("   ", "fallback") == "fallback"
+    assert tc.safe_output_name("..", "fallback") == "fallback"
+    assert tc.safe_output_name(".", "fallback") == "fallback"
+    long_name = "x" * 500
+    assert len(tc.safe_output_name(long_name, "fb")) <= 120
+
+
+def test_j6_output_stays_inside_dir():
+    """端到端：即使用户给恶意 output_name，最终路径仍落在 out_dir 内。"""
+    with tempfile.TemporaryDirectory() as out_dir:
+        for evil in ("../../escaped", "..\\..\\escaped", "/abs/escaped"):
+            name = tc.safe_output_name(evil, "safe")
+            path = os.path.join(out_dir, f"{name}.mp4")
+            assert os.path.dirname(os.path.abspath(path)) == \
+                os.path.abspath(out_dir), f"{evil!r} 逃逸到 {path}"
+
+
+def test_j7_resolve_output_dir_defaults_and_creates():
+    with tempfile.TemporaryDirectory() as base:
+        default_dir = os.path.join(base, "default")
+        # 留空 -> 用 default_dir，且被创建
+        got = tc.resolve_output_dir("", default_dir)
+        assert os.path.isabs(got) and os.path.isdir(got)
+        assert os.path.abspath(got) == os.path.abspath(default_dir)
+        # 相对路径 -> 解析为绝对路径（相对 cwd）
+        got2 = tc.resolve_output_dir("sub/dir", default_dir)
+        assert os.path.isabs(got2) and os.path.isdir(got2)
+        # ~ 展开
+        got3 = tc.resolve_output_dir("~", default_dir)
+        assert os.path.isabs(got3) and "~" not in got3
+
+
+def test_j8_install_pip_failure_is_fatal():
+    """P4#16：核心 pip 依赖失败必须抛错，而不是只 WARN 后继续。"""
+    import importlib
+    import types as _types
+
+    spec = importlib.util.spec_from_file_location(
+        "trunk_install", os.path.join(PKG_DIR, "install.py"))
+    inst = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(inst)
+
+    # 用假的失败结果替换 run()，验证会抛 RuntimeError
+    orig_run = inst.run
+    try:
+        inst.run = lambda cmd: _types.SimpleNamespace(returncode=1)
+        req = os.path.join(PKG_DIR, "requirements.txt")
+        assert os.path.exists(req), "requirements.txt 应存在"
+        try:
+            inst.pip_install_requirements(req)
+        except RuntimeError as e:
+            assert "imageio-ffmpeg" in str(e), f"错误信息应点名缺失依赖: {e}"
+            return
+        raise AssertionError("pip 失败未抛 RuntimeError（仍是静默 WARN）")
+    finally:
+        inst.run = orig_run
 
 
 # ===========================================================================

@@ -1,5 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Comfy-FlashVSR-Trunk contributors
 """
 Comfy-FlashVSR-Trunk
 ====================

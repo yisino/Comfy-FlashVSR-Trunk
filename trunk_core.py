@@ -1,5 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Comfy-FlashVSR-Trunk contributors
 """
 Comfy-FlashVSR-Trunk · 核心逻辑
 ================================
@@ -42,6 +44,80 @@ MIN_FRAMES = 21
 def _warn(msg: str) -> None:
     """统一的清理/非致命错误告警通道（写到 stderr，避免与节点 stdout 混在一起）。"""
     print(f"[Comfy-FlashVSR-Trunk][warn] {msg}", file=sys.stderr, flush=True)
+
+
+# ---------------------------------------------------------------------------
+# 路径安全（P4#15）：节点输出名与输出目录来自用户输入，需规范化后再落盘
+# ---------------------------------------------------------------------------
+# Windows / POSIX 上都可能出问题字符（Windows 更严格）
+_INVALID_NAME_CHARS = '<>:"/\\|?*'
+
+
+def safe_output_name(name: str, fallback: str = "output",
+                     max_len: int = 120) -> str:
+    """把用户提供的输出名规范为「安全的文件基名」，防路径穿越。
+
+    ``output_name`` 会被拼进输出路径（``os.path.join(out_dir, name + ".mp4")``）。
+    若用户填入 ``../../evil`` 或 ``C:\\Windows\\x``，结果会写穿 out_dir。
+    本函数剥离一切目录语义，只保留一个平坦的文件基名。
+
+    - 去除首尾空白与控制字符；
+    - ``..`` / ``.`` / 目录分隔符 / 盘符 全部剔除；
+    - 剔除文件系统非法字符；
+    - 空结果（或纯 ``.``）回退到 ``fallback``；
+    - 截断到 ``max_len``（保留扩展名空间）。
+
+    Args:
+        name: 用户输入的原始输出名。
+        fallback: 规范后为空时的回退名。
+        max_len: 最大长度。
+
+    Returns:
+        安全的文件基名（不含目录、不含扩展名）。
+    """
+    raw = (name or "").strip()
+    # 先按路径分隔符与盘符切段，取最后一段（去掉任何目录前缀）
+    for sep in ("/", "\\"):
+        raw = raw.split(sep)[-1]
+    if ":" in raw:                       # Windows 盘符，如 C:foo
+        raw = raw.split(":")[-1]
+    # 剔除控制字符与文件系统非法字符
+    cleaned = "".join(
+        ch for ch in raw
+        if ch.isprintable() and ch not in _INVALID_NAME_CHARS
+    ).strip(" .")
+    # 纯点段（., ..）在 split 后可能残留为空
+    if not cleaned:
+        cleaned = fallback
+    if len(cleaned) > max_len:
+        cleaned = cleaned[:max_len].rstrip(" .") or fallback
+    return cleaned
+
+
+def resolve_output_dir(output_dir: str, default_dir: str) -> str:
+    """把用户提供的输出目录解析为规范化的绝对路径，并确保其存在。
+
+    - 空值 / 纯空白 -> 使用 ``default_dir``；
+    - 相对路径（如 ``out``）相对当前工作目录解析，避免「文件不知写哪去了」；
+    - ``~`` 展开为用户主目录；
+    - 自动创建目录（含父级）。
+
+    Args:
+        output_dir: 用户输入的输出目录。
+        default_dir: 留空时使用的默认目录。
+
+    Returns:
+        规范化的绝对路径。
+
+    Raises:
+        OSError: 目录无法创建（无权限 / 路径被文件占用等）。
+    """
+    d = (output_dir or "").strip()
+    if not d:
+        d = default_dir
+    d = os.path.abspath(os.path.expanduser(d))
+    os.makedirs(d, exist_ok=True)
+    return d
 
 # 基础节点 preset -> 内部参数 (mode, sr, kvr, lr, td, tv, ts, to)
 # 与 ComfyUI-FlashVSR/AILab_FlashVSR.py 中的 presets 映射保持一致

@@ -7,6 +7,8 @@
 > 本插件是 **FlashVSR 流水线的「主干（Trunk）」编排层**，模型与推理代码复用已安装的  
 > [`ComfyUI-FlashVSR`](https://github.com/1038lab/ComfyUI-FlashVSR)。
 
+[English version / 英文说明](README_EN.md)
+
 
 
 ---
@@ -140,10 +142,17 @@ Comfy-FlashVSR-Trunk/
 ├── publish.ps1 / publish.sh # 一键多平台同步（含 -Deploy 部署到本地 ComfyUI）
 ├── example_workflows/
 │   └── FlashVSR_Trunk_demo.json   # 即插即用示例（VHS → Trunk_Frames → VHS）
-└── legacy/                  # 前一个任务的全部修改（保留可追溯）
+├── scripts/
+│   └── make_demo.py         # 由 legacy 工作流重新生成示例（可复现）
+└── legacy/                  # ⚠️ 历史归档，仅作参考，已被本插件取代
     ├── workflows/           # FlashVSR.json(改unload) + 6 份重叠分块工作流
     └── scripts/             # merge_overlap / queue_overlap / watch_and_merge / 生成器
 ```
+
+> **`legacy/` 说明**：这是「手工跑 6 份分块工作流 + 合并脚本」时代的产物，
+> 功能已全部被本插件的 4 个节点取代（其中 `merge_overlap.py` 的双边裁切 bug
+> 已在本插件中以 Convention B 修正）。**新用户请忽略该目录**，它仅为保留
+> 可追溯性而留，不影响插件运行，删除也不会造成任何功能缺失。
 
 ---
 
@@ -171,8 +180,21 @@ Comfy-FlashVSR-Trunk/
 
 ## 测试
 
-测试套件位于 `tests/test_trunk.py`，共 **42 项**（覆盖节点契约 / 分块规划 / 模块
-解析 / ffmpeg IO / 端到端合并 / 张量重建 / 参数映射 / 异常边界 / type hints）。
+测试套件位于 `tests/test_trunk.py`，共 **50 项**（10 组）：
+
+| 组 | 覆盖内容 | 项数 |
+|---|---|---|
+| A | 节点注册 + ComfyUI 契约 + 签名与 INPUT_TYPES 对齐 | 5 |
+| B | plan_chunks 覆盖/重叠/最小长度/退化/无死循环/边界 | 8 |
+| C | 模块解析 + 路径发现不触发重导入 | 3 |
+| D | ffmpeg 定位 + 探测 + 读写往返 | 3 |
+| E | 端到端合并（含带音频轨）| 5 |
+| F | 张量重建 Convention B + 逐帧严格递增 | 4 |
+| G | 参数构造 + 正反映射一致性 | 5 |
+| H | 异常边界 | 6 |
+| I | type hints 完整性 | 3 |
+| J | **路径安全：输出名防穿越 + 输出目录规范化 + install 失败升级** | 8 |
+
 **不依赖 GPU 与真实模型推理**，可在任意环境运行：
 
 ```bash

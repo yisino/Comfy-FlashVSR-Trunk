@@ -1,5 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Comfy-FlashVSR-Trunk contributors
 """
 Comfy-FlashVSR-Trunk · ComfyUI 节点定义
 ========================================
@@ -64,9 +66,10 @@ def _run_file_pipeline_node(src_video, params, advanced, *,
     """
     if not src_video or not os.path.exists(src_video):
         raise FileNotFoundError(f"源视频不存在: {src_video}")
-    out_dir = output_dir.strip() or os.path.dirname(os.path.abspath(src_video))
-    os.makedirs(out_dir, exist_ok=True)
-    name = (output_name or "").strip() or default_output_name
+    # 输出路径规范化 + 输出名防穿越（P4#15）
+    out_dir = tc.resolve_output_dir(
+        output_dir, os.path.dirname(os.path.abspath(src_video)))
+    name = tc.safe_output_name(output_name, default_output_name)
     out_path = os.path.join(out_dir, f"{name}.mp4")
     final = tc.run_file_pipeline(
         src_video, params, advanced=advanced, out_path=out_path,
@@ -224,9 +227,9 @@ class FlashVSR_Trunk_Merge:
         files = sorted(glob.glob(os.path.join(chunk_dir, name_pattern)))
         if not files:
             raise FileNotFoundError(f"未找到匹配的分块: {os.path.join(chunk_dir, name_pattern)}")
-        out_dir = output_dir.strip() or chunk_dir
-        os.makedirs(out_dir, exist_ok=True)
-        name = (output_name or "").strip() or "FlashVSR_final"
+        # 输出路径规范化 + 输出名防穿越（P4#15）
+        out_dir = tc.resolve_output_dir(output_dir, os.path.abspath(chunk_dir))
+        name = tc.safe_output_name(output_name, "FlashVSR_final")
         out_path = os.path.join(out_dir, f"{name}.mp4")
         src = source_video.strip() if source_video and os.path.exists(source_video) else None
         final = tc.merge_chunk_videos(
