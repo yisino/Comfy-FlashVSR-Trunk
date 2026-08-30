@@ -1,0 +1,8 @@
+# Comfy-FlashVSR-Trunk 依赖
+#
+# 前置（必须，peer dependency）：请先安装 ComfyUI-FlashVSR
+#   ComfyUI Manager 搜索 "ComfyUI-FlashVSR"，或
+#   git clone https://github.com/1038lab/ComfyUI-FlashVSR custom_nodes/ComfyUI-FlashVSR
+#
+# torch / numpy 由 ComfyUI 运行环境自带，无需在此声明。
+imageio-ffmpeg>=0.4.0   # 分块视频合并复用其内置 ffmpeg 二进制（与 VHS 一致）

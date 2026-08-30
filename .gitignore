@@ -1,0 +1,32 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# ---- Virtual environments ----
+.venv/
+venv/
+env/
+
+# ---- ComfyUI local runtime data (never commit) ----
+user_data/
+outputs/
+temp/
+tmp/
+*.log
+
+# ---- OS / Editor ----
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*~
+
+# ---- Local validation scratch (not part of the package) ----
+validate_trunk.py
+validate_result.txt
+validate.log
