@@ -1,7 +1,7 @@
 <#
 .SYNOPSIS  Comfy-FlashVSR-Trunk 一键发布 / 多平台同步脚本
 .DESCRIPTION
-  - 幂等配置 3 个平台 remote（gitlab 内网 / github / codeup），URL 见下方 $remotes。
+  - 幂等配置 3 个平台 remote（gitee / github / codeup），URL 见下方 $remotes。
   - 向每个 remote 推送所有分支 + 标签（mirror 式同步）。
   - -Deploy 开关：把本仓库同步进本地 ComfyUI custom_nodes（解决源/部署手动 cp 不一致）。
   - 在你本机正常终端运行（需 SSH agent 已加载密钥、known_hosts 已就绪）。
@@ -17,10 +17,10 @@ param(
 $ErrorActionPreference = "Stop"
 $repo = "Comfy-FlashVSR-Trunk"
 
-# ── remote 配置（如分组/命名空间需改动，改这里即可）──────────────────────
+# ── remote 配置（如命名空间需改动，改这里即可）──────────────────────
 $remotes = @{
-  # 内网 GitLab：已替你决定分组 = rrmxyx（你的个人项目组，托管 busiproj/mobile/scrm）
-  origin = "http://gitlab.merit-link.cn/rrmxyx/$repo.git"
+  # Gitee（替换原内网 GitLab）：命名空间 simino（本机 id_ed25519 已授权）
+  origin = "git@gitee.com:simino/$repo.git"
   github = "git@github.com:yisino/$repo.git"
   codeup = "git@codeup.aliyun.com:5f28c467769820a3e817fc05/$repo.git"
 }
@@ -54,4 +54,4 @@ if ($Deploy) {
   Write-Host "deployed."
 }
 
-Write-Host "`nDONE. 三平台 remote 已配置并推送；节点位于 ComfyUI 分类 🧪AILab/⚡FlashVSR/Trunk"
+Write-Host "`nDONE. 三平台 (gitee/github/codeup) remote 已配置并推送；节点位于 ComfyUI 分类 🧪AILab/⚡FlashVSR/Trunk"

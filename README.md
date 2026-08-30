@@ -51,11 +51,11 @@ git clone https://github.com/1038lab/ComfyUI-FlashVSR
 
 | 平台 | 地址 |
 |------|------|
-| GitLab（内网） | `http://gitlab.merit-link.cn/rrmxyx/Comfy-FlashVSR-Trunk.git` |
+| Gitee | `git@gitee.com:simino/Comfy-FlashVSR-Trunk.git` |
 | GitHub | `git@github.com:yisino/Comfy-FlashVSR-Trunk.git` |
 | Codeup（阿里云） | `git@codeup.aliyun.com:5f28c467769820a3e817fc05/Comfy-FlashVSR-Trunk.git` |
 
-> GitLab 分组默认 `rrmxyx`（你的个人项目组），如需改分组改 `publish.ps1` / `publish.sh` 里的 URL 即可。
+> Gitee 命名空间默认 `simino`（本机 `id_ed25519` 已授权），如需改命名空间改 `publish.ps1` / `publish.sh` 里的 URL 即可。
 
 ---
 
@@ -123,7 +123,7 @@ Comfy-FlashVSR-Trunk/
 
 ## 多平台发布 / 同步
 
-仓库同时镜像到 **GitLab（内网）/ GitHub / Codeup（阿里云）** 三个平台。
+仓库同时镜像到 **Gitee / GitHub / Codeup（阿里云）** 三个平台。
 本机已附带一键脚本，在你**正常终端**（SSH agent 已加载密钥、known_hosts 就绪）运行：
 
 ```powershell
