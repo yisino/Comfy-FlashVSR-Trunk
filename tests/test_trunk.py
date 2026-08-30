@@ -38,10 +38,20 @@ import numpy as np
 # ---------------------------------------------------------------------------
 # 加载被测插件包（目录名含连字符，需 spec_from_file_location）
 # ---------------------------------------------------------------------------
+class _Skip(Exception):
+    """测试环境不满足前置条件时抛出；运行器记为 SKIP，不计入失败。
+
+    典型场景：CI 只克隆了 peer 而没有完整 ComfyUI 检出，
+    ``import comfy.utils`` 不可用 -> test_c4 跳过而非误报失败。
+    """
+
+
 CUSTOM_NODES = os.environ.get(
     "COMFY_CUSTOM_NODES",
     r"D:/Comfy-Desktop/ComfyUI-Installs/NVIDIA/ComfyUI/custom_nodes",
 )
+# ComfyUI 根目录（提供 folder_paths / comfy），用于真实导入 peer 的集成测试
+COMFY_ROOT = os.environ.get("COMFY_ROOT") or os.path.dirname(CUSTOM_NODES)
 PKG_DIR = os.path.join(CUSTOM_NODES, "Comfy-FlashVSR-Trunk")
 
 sys.path.insert(0, CUSTOM_NODES)
@@ -237,6 +247,62 @@ def test_c3_import_flashvsr_callable_and_attrs():
     assert tc._EFFICIENT_ATTRS == ("_setup_device_and_dtype", "init_pipe",
                                    "_pad_video_sequence", "_restore_video_sequence",
                                    "_tile", "_full")
+
+
+def test_c4_peer_module_actually_imports():
+    """**真实导入 peer 模块** —— 这是此前的覆盖盲区。
+
+    历史 bug：peer 的 ``AILab_FlashVSR.py`` 内含 ``from .FlashVSR import ...``
+    相对导入，只能以「包」的形式加载。旧实现三步都尝试顶层导入
+    ``import_module("AILab_FlashVSR")``，必然抛
+    ``ImportError: attempted relative import with no known parent package``。
+    因为该异常被 ``except Exception`` 吞掉，离线测试又刻意不触发真实导入，
+    这个缺陷直到真机运行才暴露。
+
+    本测试把 ComfyUI 根目录加入 ``sys.path``（提供 folder_paths / comfy），
+    完整走一遍 ``tc.import_flashvsr()``，确保集成路径真的通。
+    """
+    injected = []
+    for p in (COMFY_ROOT, CUSTOM_NODES):
+        if p and p not in sys.path:
+            sys.path.insert(0, p)
+            injected.append(p)
+    try:
+        try:
+            import folder_paths  # noqa: F401  (ComfyUI 核心)
+            import comfy.utils   # noqa: F401
+        except Exception as e:   # noqa: BLE001
+            raise _Skip(f"ComfyUI 运行时不可用（{type(e).__name__}: {e}）")
+
+        mod = tc.import_flashvsr()
+        assert mod is not None, "import_flashvsr() 返回 None"
+        missing = [a for a in tc._EFFICIENT_ATTRS if not hasattr(mod, a)]
+        assert not missing, f"peer 模块缺高效路径属性: {missing}"
+        assert hasattr(mod, "AILab_FlashVSR"), "peer 模块缺 AILab_FlashVSR 类"
+        assert hasattr(mod, "AILab_FlashVSR_Advanced"), \
+            "peer 模块缺 AILab_FlashVSR_Advanced 类"
+    finally:
+        for p in injected:
+            try:
+                sys.path.remove(p)
+            except ValueError:
+                pass
+
+
+def test_c5_peer_uses_relative_imports():
+    """守卫测试：确认 peer 仍依赖相对导入（即 import_flashvsr 必须走包加载）。
+
+    若 peer 哪天改成绝对导入，本测试会失败——届时可简化加载策略，
+    但**当前**实现必须以目录名为包名加载，不能顶层导入。
+    """
+    peer_dir = tc._ensure_flashvsr_on_path()
+    assert peer_dir, "未定位到 peer"
+    src_path = os.path.join(peer_dir, "AILab_FlashVSR.py")
+    with open(src_path, encoding="utf-8") as f:
+        src = f.read()
+    import re
+    assert re.search(r"^from\s+\.\w+", src, re.M), \
+        "peer 不再使用相对导入，请复核 _load_peer_package / import_flashvsr 的加载策略"
 
 
 # ===========================================================================
@@ -645,23 +711,28 @@ def test_j8_install_pip_failure_is_fatal():
 def _main():
     tests = [(n, o) for n, o in sorted(globals().items())
              if n.startswith("test_") and callable(o)]
-    passed, failed = [], []
+    passed, failed, skipped = [], [], []
     for name, fn in tests:
         try:
             fn()
             passed.append(name)
             print(f"  PASS  {name}")
+        except _Skip as e:
+            skipped.append((name, e))
+            print(f"  SKIP  {name}: {e}")
         except Exception as e:  # noqa: BLE001
             failed.append((name, e))
             print(f"  FAIL  {name}: {type(e).__name__}: {e}")
     print("=" * 70)
-    print(f"结果: PASS={len(passed)}  FAIL={len(failed)}  总计={len(tests)}")
+    print(f"结果: PASS={len(passed)}  SKIP={len(skipped)}  "
+          f"FAIL={len(failed)}  总计={len(tests)}")
     if failed:
         print("\n失败详情:")
         for name, e in failed:
             print(f"  - {name}: {type(e).__name__}: {e}")
         return 1
-    print("ALL TESTS PASSED ✅")
+    print("ALL TESTS PASSED ✅" if not skipped else
+          "所有可执行测试通过 ✅（部分因环境前置缺失被跳过）")
     return 0
 
 

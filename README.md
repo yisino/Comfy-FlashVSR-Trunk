@@ -180,13 +180,13 @@ Comfy-FlashVSR-Trunk/
 
 ## 测试
 
-测试套件位于 `tests/test_trunk.py`，共 **50 项**（10 组）：
+测试套件位于 `tests/test_trunk.py`，共 **52 项**（10 组）：
 
 | 组 | 覆盖内容 | 项数 |
 |---|---|---|
 | A | 节点注册 + ComfyUI 契约 + 签名与 INPUT_TYPES 对齐 | 5 |
 | B | plan_chunks 覆盖/重叠/最小长度/退化/无死循环/边界 | 8 |
-| C | 模块解析 + 路径发现不触发重导入 | 3 |
+| C | 模块解析 + 路径发现不触发重导入 + **真实导入 peer（集成）** | 5 |
 | D | ffmpeg 定位 + 探测 + 读写往返 | 3 |
 | E | 端到端合并（含带音频轨）| 5 |
 | F | 张量重建 Convention B + 逐帧严格递增 | 4 |
@@ -211,8 +211,18 @@ python -m pytest tests/ -v
 COMFY_CUSTOM_NODES=/path/to/ComfyUI/custom_nodes python tests/test_trunk.py
 ```
 
-> 前提：需已安装 `ComfyUI-FlashVSR`（peer 依赖，测试 C 组会校验其可发现性）
-> 与 `ffmpeg`（`imageio-ffmpeg` 或系统 ffmpeg）。CI 会自动克隆 peer 并安装 ffmpeg。
+> 前提：需已安装 `ComfyUI-FlashVSR`（peer 依赖）与 `ffmpeg`。
+>
+> **`test_c4` 是唯一的集成测试**——它会把 ComfyUI 根目录加入 `sys.path` 并
+> **真实导入 peer 模块**，验证 6 个高效路径属性与两个节点类可用。这是最容易
+> 出问题的路径（peer 内部用相对导入，必须以「包」形式加载），须在有完整
+> ComfyUI 检出的环境运行：
+> ```bash
+> COMFY_CUSTOM_NODES=/path/to/custom_nodes \
+> COMFY_ROOT=/path/to/ComfyUI \
+> python tests/test_trunk.py
+> ```
+> 环境不满足时该项会标记 **SKIP**（不计失败），因此 CI 中不会误报。
 
 ## 卸载
 

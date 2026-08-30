@@ -191,6 +191,37 @@ def _ensure_flashvsr_on_path() -> Optional[str]:
     return None
 
 
+def _load_peer_package(peer_dir: str) -> ModuleType:
+    """把 peer 目录按「目录名」作为包加载，使其内部相对导入可用。
+
+    **关键**：peer 的 ``AILab_FlashVSR.py`` 内含
+    ``from .FlashVSR import ModelManager, ...`` 这类**相对导入**，
+    因此它只能作为**包的一部分**被导入（包名 = 目录名，如 ``ComfyUI-FlashVSR``）。
+    直接 ``import_module("AILab_FlashVSR")`` 会抛
+    ``ImportError: attempted relative import with no known parent package``。
+
+    ComfyUI 自身正是用 ``spec_from_file_location(目录名, __init__.py,
+    submodule_search_locations=[目录])`` 的方式加载自定义节点的，这里保持一致。
+
+    Args:
+        peer_dir: ComfyUI-FlashVSR 安装目录的绝对路径。
+
+    Returns:
+        已加载的包模块对象。
+    """
+    pkg_name = os.path.basename(peer_dir.rstrip("/\\"))
+    cached = sys.modules.get(pkg_name)
+    if cached is not None:
+        return cached
+    init = os.path.join(peer_dir, "__init__.py")
+    spec = importlib.util.spec_from_file_location(
+        pkg_name, init, submodule_search_locations=[peer_dir])
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[pkg_name] = mod          # 必须先注册，否则包内相对导入失败
+    spec.loader.exec_module(mod)
+    return mod
+
+
 def import_flashvsr() -> ModuleType:
     """导入已安装的 ComfyUI-FlashVSR 的 AILab_FlashVSR 模块。
 
@@ -198,31 +229,39 @@ def import_flashvsr() -> ModuleType:
         模块对象。
 
     Raises:
-        FlashVSRNotInstalled: 未找到 peer 目录，或 peer 已定位但导入失败
-            （通常是离线环境缺少 torch/comfy 运行时依赖）。
+        FlashVSRNotInstalled: 未找到 peer 目录，或 peer 已定位但导入失败。
+
+    策略（按成本从低到高）：
+      0. ComfyUI 启动时已加载过 -> 直接复用 ``sys.modules``，**零成本且最可靠**；
+      1. 顶层直接导入（兼容「AILab_FlashVSR.py 平铺在 custom_nodes」的非常规装法）；
+      2. 定位 peer 目录后，以**包**的形式加载并取其子模块（正确处理相对导入）。
 
     注：路径发现 (``_ensure_flashvsr_on_path``) 是纯 IO 操作，不触发重模块
     加载；只有本函数真正执行 ``importlib.import_module``。
     """
-    # 1) 直接按模块名导入（ComfyUI 会把 custom_nodes/ComfyUI-FlashVSR 加入 sys.path）
+    # 0) ComfyUI 已加载：目录名作包名，子模块名为 "<目录名>.AILab_FlashVSR"
+    for name in ("ComfyUI-FlashVSR.AILab_FlashVSR", "AILab_FlashVSR"):
+        cached = sys.modules.get(name)
+        if cached is not None:
+            return cached
+    # 1) 顶层直接导入（peer 不含相对导入时才可能成功）
     try:
         return importlib.import_module("AILab_FlashVSR")
     except ImportError:
         pass
-    # 2) 作为包的子模块导入
-    try:
-        return importlib.import_module("ComfyUI_FlashVSR.AILab_FlashVSR")
-    except ImportError:
-        pass
-    # 3) 文件系统扫描：将 peer 目录加入 sys.path 后再尝试 (1)
+    # 2) 作为 peer 包的子模块导入
     peer_dir = _ensure_flashvsr_on_path()
     if peer_dir:
+        pkg_name = os.path.basename(peer_dir.rstrip("/\\"))
         try:
-            return importlib.import_module("AILab_FlashVSR")
+            _load_peer_package(peer_dir)
+            return importlib.import_module(f"{pkg_name}.AILab_FlashVSR")
         except ImportError as e:
             raise FlashVSRNotInstalled(
-                f"已定位 ComfyUI-FlashVSR 于 {peer_dir}，但实际导入失败：{e}。"
-                "通常是 torch/comfy 等运行时依赖缺失，请在 ComfyUI 运行时内执行本插件。"
+                f"已定位 ComfyUI-FlashVSR 于 {peer_dir}，但导入子模块失败：{e}\n"
+                "常见原因：ComfyUI 根目录不在 sys.path（缺少 folder_paths / comfy 模块），"
+                "或 peer 依赖（einops / safetensors / huggingface_hub）未安装。\n"
+                "请在 ComfyUI 运行时内执行本插件；若用 Manager 安装，请重启 ComfyUI 后再试。"
             ) from e
     raise FlashVSRNotInstalled(
         "未找到已安装的 ComfyUI-FlashVSR 节点。请先通过 ComfyUI Manager 或 "

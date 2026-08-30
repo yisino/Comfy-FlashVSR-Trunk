@@ -259,3 +259,16 @@ node.json / README / LICENSE / publish.*
 3. `merge_chunk_videos` — `-vsync 0` 与 `-r` 冲突崩溃 + `select` 边界多丢 4 帧（120→116）
 4. `FlashVSRPipe.close()` **行为与命名不符** —— 调用不存在的 `peer.clean_vram()`，实际未清理 VRAM
 5. `import_flashvsr` 缺 return type hint —— 唯一一处 P2.9 漏网（由测试 I1 捕获）
+6. **`import_flashvsr` 无法真实导入 peer（P0，真机运行才暴露）** ——
+   peer 的 `AILab_FlashVSR.py` 含 `from .FlashVSR import ...` 相对导入，
+   只能以「包」形式加载（包名 = 目录名 `ComfyUI-FlashVSR`）。旧实现三步都尝试
+   顶层 `import_module("AILab_FlashVSR")`，必然抛
+   `ImportError: attempted relative import with no known parent package`，
+   又被 `except Exception` 吞掉，只报「未找到 ComfyUI-FlashVSR」。
+   **即插件此前从未真正跑通过模型推理。**
+   修复：新增 `_load_peer_package()`（按目录名 + `submodule_search_locations`
+   加载），并优先复用 ComfyUI 已加载的 `sys.modules["ComfyUI-FlashVSR.AILab_FlashVSR"]`。
+   根因不在代码而在**测试盲区**：离线测试刻意不触发真实导入，故补
+   `test_c4`（真实导入，验证 6 属性 + 2 类）与 `test_c5`（相对导入守卫）。
+   > 教训：**「不触发重依赖」的设计必须与「集成路径必须被真实验证」配套**，
+   > 否则离线测试全绿会掩盖致命缺陷。

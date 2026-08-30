@@ -25,6 +25,14 @@ jobs:
       - name: Clone peer dependency (ComfyUI-FlashVSR)
         run: git clone --depth 1 https://github.com/1038lab/ComfyUI-FlashVSR custom_nodes/ComfyUI-FlashVSR
 
+      # 集成测试 test_c4 需要 folder_paths / comfy 才能真实导入 peer。
+      # CI 中若导入失败，该项会优雅 SKIP（不计失败），不会误报。
+      - name: Clone ComfyUI (for integration test, best effort)
+        continue-on-error: true
+        run: |
+          git clone --depth 1 https://github.com/comfyanonymous/ComfyUI.git comfyui
+          pip install -r comfyui/requirements.txt || true
+
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v5
         with:
@@ -45,6 +53,7 @@ jobs:
       - name: Run test suite
         env:
           COMFY_CUSTOM_NODES: ${{ github.workspace }}/custom_nodes
+          COMFY_ROOT: ${{ github.workspace }}/comfyui
         run: python custom_nodes/Comfy-FlashVSR-Trunk/tests/test_trunk.py
 
       - name: Syntax check (install.py / nodes.py / trunk_core.py)
