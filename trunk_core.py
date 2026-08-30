@@ -19,12 +19,17 @@ Comfy-FlashVSR-Trunk · 核心逻辑
 （与 VHS 一致），找不到时退回系统 ffmpeg。
 """
 
+from __future__ import annotations  # 允许所有注解以字符串形式求值，便于使用未导入的类型名
+
 import os
 import sys
 import glob
 import shutil
 import subprocess
 import importlib
+import importlib.util
+from typing import Any, Callable, Dict, List, Optional, Tuple
+
 
 # ---------------------------------------------------------------------------
 # 常量
@@ -33,7 +38,7 @@ import importlib
 MIN_FRAMES = 21
 
 
-def _warn(msg):
+def _warn(msg: str) -> None:
     """统一的清理/非致命错误告警通道（写到 stderr，避免与节点 stdout 混在一起）。"""
     print(f"[Comfy-FlashVSR-Trunk][warn] {msg}", file=sys.stderr, flush=True)
 
@@ -69,34 +74,79 @@ class FlashVSRNotInstalled(RuntimeError):
     pass
 
 
+def _ensure_flashvsr_on_path() -> Optional[str]:
+    """定位 ComfyUI-FlashVSR 安装目录并确保它在 sys.path 上。
+
+    **纯路径发现**：不执行 importlib.import_module（那会拉起 torch / comfy 等
+    重依赖，在离线校验/安装钩子里可能挂死）。仅做 find_spec + glob 扫描。
+
+    Returns:
+        包含 ``AILab_FlashVSR.py`` 的目录绝对路径；若定位不到则返回 None。
+    """
+    # 1) 是否已通过常规 sys.path 直接可解析？find_spec 返回 spec.origin 但
+    #    不会执行模块体——这是「定位而不加载」的标准接口。
+    try:
+        spec = importlib.util.find_spec("AILab_FlashVSR")
+    except (ImportError, ValueError):
+        spec = None
+    if spec and spec.origin:
+        d = os.path.dirname(spec.origin)
+        if d and d not in sys.path:
+            sys.path.insert(0, d)
+        return d
+    # 2) 文件系统扫描：custom_nodes 同级或上层的常见安装位置
+    here = os.path.dirname(os.path.abspath(__file__))
+    candidates = (
+        here,
+        os.path.dirname(here),                          # custom_nodes/
+        os.path.dirname(os.path.dirname(here)),          # ComfyUI/
+    )
+    for root in candidates:
+        hits = glob.glob(
+            os.path.join(root, "**", "ComfyUI-FlashVSR", "AILab_FlashVSR.py"),
+            recursive=True,
+        )
+        if hits:
+            d = os.path.dirname(hits[0])
+            if d not in sys.path:
+                sys.path.insert(0, d)
+            return d
+    return None
+
+
 def import_flashvsr():
     """导入已安装的 ComfyUI-FlashVSR 的 AILab_FlashVSR 模块。
 
-    返回模块对象；若未安装则抛出 FlashVSRNotInstalled（含安装指引）。
+    Returns:
+        模块对象。
+
+    Raises:
+        FlashVSRNotInstalled: 未找到 peer 目录，或 peer 已定位但导入失败
+            （通常是离线环境缺少 torch/comfy 运行时依赖）。
+
+    注：路径发现 (``_ensure_flashvsr_on_path``) 是纯 IO 操作，不触发重模块
+    加载；只有本函数真正执行 ``importlib.import_module``。
     """
     # 1) 直接按模块名导入（ComfyUI 会把 custom_nodes/ComfyUI-FlashVSR 加入 sys.path）
     try:
         return importlib.import_module("AILab_FlashVSR")
-    except Exception:
+    except ImportError:
         pass
     # 2) 作为包的子模块导入
     try:
         return importlib.import_module("ComfyUI_FlashVSR.AILab_FlashVSR")
-    except Exception:
+    except ImportError:
         pass
-    # 3) 文件系统扫描 custom_nodes/ComfyUI-FlashVSR/AILab_FlashVSR.py
-    try:
-        here = os.path.dirname(os.path.abspath(__file__))
-        for root in (here, os.path.dirname(here), os.path.dirname(os.path.dirname(here))):
-            hits = glob.glob(os.path.join(root, "**", "ComfyUI-FlashVSR", "AILab_FlashVSR.py"),
-                             recursive=True)
-            if hits:
-                d = os.path.dirname(hits[0])
-                if d not in sys.path:
-                    sys.path.insert(0, d)
-                return importlib.import_module("AILab_FlashVSR")
-    except Exception:
-        pass
+    # 3) 文件系统扫描：将 peer 目录加入 sys.path 后再尝试 (1)
+    peer_dir = _ensure_flashvsr_on_path()
+    if peer_dir:
+        try:
+            return importlib.import_module("AILab_FlashVSR")
+        except ImportError as e:
+            raise FlashVSRNotInstalled(
+                f"已定位 ComfyUI-FlashVSR 于 {peer_dir}，但实际导入失败：{e}。"
+                "通常是 torch/comfy 等运行时依赖缺失，请在 ComfyUI 运行时内执行本插件。"
+            ) from e
     raise FlashVSRNotInstalled(
         "未找到已安装的 ComfyUI-FlashVSR 节点。请先通过 ComfyUI Manager 或 "
         "git clone https://github.com/1038lab/ComfyUI-FlashVSR 安装到 custom_nodes，"
@@ -107,7 +157,8 @@ def import_flashvsr():
 # ---------------------------------------------------------------------------
 # 分块规划
 # ---------------------------------------------------------------------------
-def plan_chunks(total, chunk_size, overlap, min_frames=MIN_FRAMES):
+def plan_chunks(total: int, chunk_size: int, overlap: int,
+                min_frames: int = MIN_FRAMES) -> List[Tuple[int, int]]:
     """把 [0, total) 帧规划为带重叠的时间分块列表 [(s, e), ...]。
 
     - 每块长度不超过 chunk_size；
@@ -136,14 +187,19 @@ def plan_chunks(total, chunk_size, overlap, min_frames=MIN_FRAMES):
     return [(s, e) for s, e in chunks]
 
 
-def _trim_overlap(up, s, e, total, overlap):
+def _trim_overlap(up: "Any", s: int, e: int, total: int, overlap: int) -> "Any":
     """按分块位置裁掉重叠区（Convention B：除首块外，各块丢弃头部重叠帧，
     尾部全部保留）。保证相邻块连续、无丢帧、无重复。
 
     数学上：块 i(>0) 丢弃头部 overlap 帧 -> 保留 [s_i+overlap, e_i)；
     块 i-1 保留到 e_{i-1}=s_i，二者在 s_i 处连续，重叠区被块 i-1 的尾部保留。
+
+    Args:
+        up: 上采样后的帧张量（``[L, ...]``，实际类型 torch.Tensor / numpy.ndarray）。
+        s, e: 当前块的 [start, end) 区间。
+        total: 整段总帧数（保留参数供对称性扩展）。
+        overlap: 相邻块重叠帧数。
     """
-    L = up.shape[0]
     ts = overlap if s > 0 else 0
     if ts == 0:
         return up
@@ -153,16 +209,21 @@ def _trim_overlap(up, s, e, total, overlap):
 # ---------------------------------------------------------------------------
 # 参数构造
 # ---------------------------------------------------------------------------
-def basic_params(preset, scale, unload_model, seed):
+def basic_params(preset: str, scale: int, unload_model: bool, seed: int) -> Dict[str, Any]:
+    """基础节点 preset -> 内部 FlashVSR 调用参数字典。"""
     mode, sr, kvr, lr, td, tv, ts, to = _BASIC_PRESETS[preset]
     return dict(mode=mode, scale=scale, tiling=td, ts=ts, to=to, sr=sr, kvr=kvr,
                 lr=lr, cf=True, ud=unload_model, tv=tv, seed=seed,
                 device="auto", dtype="bf16")
 
 
-def advanced_params(model_version, scale, enable_tiling, tile_size, tile_overlap,
-                    speed_optimization, quality_boost, stability_level, color_fix,
-                    vae_tiling, unload_model, device, precision, seed):
+def advanced_params(model_version: str, scale: int, enable_tiling: bool,
+                    tile_size: int, tile_overlap: int,
+                    speed_optimization: float, quality_boost: float,
+                    stability_level: int, color_fix: bool, vae_tiling: bool,
+                    unload_model: bool, device: str, precision: str,
+                    seed: int) -> Dict[str, Any]:
+    """高级节点参数 -> 内部 FlashVSR 调用参数字典。"""
     return dict(mode=_ADV_MODE_MAP[model_version], scale=scale, tiling=enable_tiling,
                 ts=tile_size, to=tile_overlap, sr=speed_optimization,
                 kvr=quality_boost, lr=stability_level, cf=color_fix,
@@ -170,7 +231,7 @@ def advanced_params(model_version, scale, enable_tiling, tile_size, tile_overlap
                 device=device, dtype=precision)
 
 
-def _upscale_kwargs(params, advanced):
+def _upscale_kwargs(params: Dict[str, Any], advanced: bool) -> Dict[str, Any]:
     """构造调用 AILab_FlashVSR / AILab_FlashVSR_Advanced.upscale() 的关键字参数
     （fallback 路径用）。"""
     if advanced:
@@ -209,7 +270,7 @@ class FlashVSRPipe:
     若内部函数不可用（版本变更），自动降级为「每块调用一次 upscale()」。
     """
 
-    def __init__(self, params, advanced):
+    def __init__(self, params: Dict[str, Any], advanced: bool) -> None:
         self.mod = import_flashvsr()
         self.params = params
         self.advanced = advanced
@@ -217,7 +278,7 @@ class FlashVSRPipe:
         self.dev, self.dt = self.mod._setup_device_and_dtype(params["device"], params["dtype"])
         self.pipe = self.mod.init_pipe(params["mode"], self.dev, self.dt)
 
-    def upscale_chunk(self, cf):
+    def upscale_chunk(self, cf: "Any") -> "Any":
         """cf: [L,H,W,3] float32 张量（单块帧）。返回同帧数的上采样张量。"""
         p = self.params
         if self.efficient:
@@ -238,7 +299,7 @@ class FlashVSRPipe:
         kws["audio"] = None
         return cls().upscale(**kws)[0]
 
-    def close(self):
+    def close(self) -> None:
         """释放模型并清理 VRAM 缓存。
 
         注：peer 模块没有 `clean_vram()` 函数（已确认），故此处改为本地实现：
@@ -261,7 +322,8 @@ class FlashVSRPipe:
 # ---------------------------------------------------------------------------
 # 上采样入口（张量版，用于 drop-in 节点）
 # ---------------------------------------------------------------------------
-def upscale_frames_chunked(frames, params, advanced, chunk_size, overlap):
+def upscale_frames_chunked(frames: "Any", params: Dict[str, Any], advanced: bool,
+                            chunk_size: int, overlap: int) -> "Any":
     """对整段 frames 张量做重叠分块上采样，返回拼接后的张量。
 
     frames: torch.Tensor [B,H,W,3] float32 in [0,1]
@@ -290,7 +352,7 @@ def upscale_frames_chunked(frames, params, advanced, chunk_size, overlap):
 # ---------------------------------------------------------------------------
 # ffmpeg 定位 + 视频 IO（文件流水线模式用）
 # ---------------------------------------------------------------------------
-def get_ffmpeg():
+def get_ffmpeg() -> str:
     """优先复用 imageio-ffmpeg 内置二进制（与 VHS 一致），否则退回系统 ffmpeg。"""
     try:
         import imageio_ffmpeg
@@ -303,7 +365,8 @@ def get_ffmpeg():
     raise RuntimeError("找不到 ffmpeg：请安装 imageio-ffmpeg（pip install imageio-ffmpeg）或系统 ffmpeg。")
 
 
-def probe_frames(path, ff=None):
+def probe_frames(path: str, ff: Optional[str] = None) -> Optional[int]:
+    """探测视频帧数。失败返回 None（调用方需显式判 None）。"""
     ff = ff or get_ffmpeg()
     r = subprocess.run([ff, "-hide_banner", "-i", path, "-map", "0:v:0",
                         "-c", "copy", "-f", "null", "-"],
@@ -316,7 +379,7 @@ def probe_frames(path, ff=None):
     return int(m.group(1)) if m else None
 
 
-def probe_size(path, ff=None):
+def probe_size(path: str, ff: Optional[str] = None) -> Tuple[int, int, float]:
     """返回 (width, height, fps)。优先 ffprobe，缺失则用 ffmpeg 解析。"""
     ff = ff or get_ffmpeg()
     try:
@@ -351,7 +414,8 @@ def probe_size(path, ff=None):
     return w, h, fps
 
 
-def read_frames_ffmpeg(path, start, end, ff=None):
+def read_frames_ffmpeg(path: str, start: int, end: int,
+                       ff: Optional[str] = None) -> "Any":
     """用 ffmpeg 提取 [start, end) 帧区间，返回 uint8 RGB numpy 数组 [N,H,W,3]。"""
     import numpy as np
     ff = ff or get_ffmpeg()
@@ -371,7 +435,9 @@ def read_frames_ffmpeg(path, start, end, ff=None):
     return arr
 
 
-def write_frames_ffmpeg(frames, w, h, fps, out_path, crf=19, ff=None):
+def write_frames_ffmpeg(frames: "Any", w: int, h: int, fps: float,
+                        out_path: str, crf: int = 19,
+                        ff: Optional[str] = None) -> None:
     """把 uint8 RGB 数组 [N,H,W,3] 写成 h264 mp4（经 ffmpeg pipe）。"""
     import numpy as np
     ff = ff or get_ffmpeg()
@@ -394,8 +460,11 @@ def write_frames_ffmpeg(frames, w, h, fps, out_path, crf=19, ff=None):
 # ---------------------------------------------------------------------------
 # 分块视频合并（重叠去重 + 复用源音频）
 # ---------------------------------------------------------------------------
-def merge_chunk_videos(chunk_paths, out_path, overlap, source_audio_path=None,
-                       fps=None, crf=19, pix_fmt="yuv420p", ff=None):
+def merge_chunk_videos(chunk_paths: List[str], out_path: str, overlap: int,
+                       source_audio_path: Optional[str] = None,
+                       fps: Optional[float] = None, crf: int = 19,
+                       pix_fmt: str = "yuv420p",
+                       ff: Optional[str] = None) -> str:
     """拼接分块视频：每段裁掉重叠区（头/尾各 overlap 帧），最后复用源音频合成最终 mp4。
 
     与历史 merge_overlap.py 逻辑一致，但做成可复用函数。
@@ -467,8 +536,11 @@ def merge_chunk_videos(chunk_paths, out_path, overlap, source_audio_path=None,
 # ---------------------------------------------------------------------------
 # 文件流水线：读源视频 -> 逐块上采样落盘 -> 合并
 # ---------------------------------------------------------------------------
-def run_file_pipeline(src_video, params, advanced, out_path, chunk_size=128,
-                      overlap=16, fps=None, crf=19, ff=None, log=print):
+def run_file_pipeline(src_video: str, params: Dict[str, Any], advanced: bool,
+                      out_path: str, chunk_size: int = 128, overlap: int = 16,
+                      fps: Optional[float] = None, crf: int = 19,
+                      ff: Optional[str] = None,
+                      log: Callable[[str], Any] = print) -> str:
     """完整的 RAM-safe 文件流水线（FlashVSR_Trunk 节点核心）。
 
     1. 探测总帧数；
