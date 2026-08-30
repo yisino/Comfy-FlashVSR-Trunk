@@ -29,7 +29,13 @@ import importlib
 # ---------------------------------------------------------------------------
 # 常量
 # ---------------------------------------------------------------------------
-MIN_FRAMES = 21  # FlashVSR 要求的最少帧数
+# FlashVSR 在帧数 < 21 时 _pad_video_sequence 边界报错；末块过短则并入前一块。
+MIN_FRAMES = 21
+
+
+def _warn(msg):
+    """统一的清理/非致命错误告警通道（写到 stderr，避免与节点 stdout 混在一起）。"""
+    print(f"[Comfy-FlashVSR-Trunk][warn] {msg}", file=sys.stderr, flush=True)
 
 # 基础节点 preset -> 内部参数 (mode, sr, kvr, lr, td, tv, ts, to)
 # 与 ComfyUI-FlashVSR/AILab_FlashVSR.py 中的 presets 映射保持一致
@@ -51,6 +57,9 @@ _MODE_TO_BASIC = {
     "tiny-long": "Long Video (Low VRAM)",
     "full":      "High Quality (Best)",
 }
+# mode -> model_version（fallback 路径反向映射，避免在 _upscale_kwargs 中
+# 每次构造字典推导）。
+_MODE_TO_MODEL_VERSION = {v: k for k, v in _ADV_MODE_MAP.items()}
 
 
 # ---------------------------------------------------------------------------
@@ -166,7 +175,7 @@ def _upscale_kwargs(params, advanced):
     （fallback 路径用）。"""
     if advanced:
         return dict(
-            model_version={v: k for k, v in _ADV_MODE_MAP.items()}[params["mode"]],
+            model_version=_MODE_TO_MODEL_VERSION[params["mode"]],
             scale=params["scale"], enable_tiling=params["tiling"],
             tile_size=params["ts"], tile_overlap=params["to"],
             speed_optimization=params["sr"], quality_boost=params["kvr"],
@@ -183,6 +192,11 @@ def _upscale_kwargs(params, advanced):
 # ---------------------------------------------------------------------------
 # FlashVSR 管道封装（模型只加载一次，逐块复用）
 # ---------------------------------------------------------------------------
+# 高效路径所需的内部函数清单。对应 1038lab/ComfyUI-FlashVSR 主分支
+# AILab_FlashVSR.py（当前实现：_setup_device_and_dtype L310 / init_pipe L263 /
+# _pad_video_sequence L172 / _restore_video_sequence L182 / _tile L394 /
+# _full L379）。peer 升级时如内部 API 变更需重新核对（FlashVSRPipe 会自动
+# 降级到 upscale() fallback 路径）。
 _EFFICIENT_ATTRS = ("_setup_device_and_dtype", "init_pipe", "_pad_video_sequence",
                     "_restore_video_sequence", "_tile", "_full")
 
@@ -225,14 +239,23 @@ class FlashVSRPipe:
         return cls().upscale(**kws)[0]
 
     def close(self):
+        """释放模型并清理 VRAM 缓存。
+
+        注：peer 模块没有 `clean_vram()` 函数（已确认），故此处改为本地实现：
+        删除 Python 引用、显式释放 CUDA 缓存、触发 gc，确保名称与行为一致。
+        """
         try:
             del self.pipe
         except Exception:
             pass
         try:
-            self.mod.clean_vram()
-        except Exception:
-            pass
+            import gc
+            import torch  # noqa: F401  （确保 torch 模块可见）
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception as e:  # noqa: BLE001
+            _warn(f"VRAM 清理失败（不影响功能，下次推理会自动重置）: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -356,12 +379,16 @@ def write_frames_ffmpeg(frames, w, h, fps, out_path, crf=19, ff=None):
         [ff, "-y", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{w}x{h}",
          "-r", str(fps), "-i", "-", "-pix_fmt", "yuv420p", "-c:v", "libx264",
          "-crf", str(crf), "-movflags", "+faststart", out_path],
-        stdin=subprocess.PIPE)
+        stdin=subprocess.PIPE, stderr=subprocess.PIPE)
     proc.stdin.write(np.ascontiguousarray(frames).tobytes())
     proc.stdin.close()
-    proc.wait()
+    _, err = proc.communicate(timeout=600)
     if proc.returncode != 0:
-        raise RuntimeError(f"写 chunk 视频失败 (ffmpeg rc={proc.returncode}): {out_path}")
+        tail = (err or b"").decode("utf-8", errors="replace").strip().splitlines()[-12:]
+        raise RuntimeError(
+            f"写 chunk 视频失败 (ffmpeg rc={proc.returncode}): {out_path}\n"
+            f"  ffmpeg stderr 尾部:\n    " + "\n    ".join(tail)
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -395,7 +422,14 @@ def merge_chunk_videos(chunk_paths, out_path, overlap, source_audio_path=None,
             outp = os.path.join(tmp, f"seg_{i+1:02d}.mp4")
             cmd = [ff, "-hide_banner", "-i", p, "-vf", vf, "-vsync", "0",
                    "-pix_fmt", pix_fmt, "-crf", str(crf), "-c:a", "copy", outp]
-            subprocess.run(cmd, check=True)
+            try:
+                subprocess.run(cmd, check=True, capture_output=True, text=True)
+            except subprocess.CalledProcessError as e:
+                tail = (e.stderr or "").strip().splitlines()[-12:]
+                raise RuntimeError(
+                    f"分块裁切失败 (segment {i+1}/{n}): {p}\n"
+                    f"  ffmpeg stderr 尾部:\n    " + "\n    ".join(tail)
+                ) from None
             segs.append(outp)
 
         listf = os.path.join(tmp, "list.txt")
@@ -411,15 +445,22 @@ def merge_chunk_videos(chunk_paths, out_path, overlap, source_audio_path=None,
                     "-c:v", "copy", "-c:a", "aac", "-shortest", out_path]
         else:
             cmd += ["-c:v", "copy", out_path]
-        subprocess.run(cmd, check=True)
+        try:
+            subprocess.run(cmd, check=True, capture_output=True, text=True)
+        except subprocess.CalledProcessError as e:
+            tail = (e.stderr or "").strip().splitlines()[-12:]
+            raise RuntimeError(
+                f"分块拼接失败: {out_path}\n"
+                f"  ffmpeg stderr 尾部:\n    " + "\n    ".join(tail)
+            ) from None
     finally:
-        # 清理临时段文件
+        # 清理临时段文件（失败不致命，但需上报以便排错）
         try:
             for f in glob.glob(os.path.join(tmp, "*")):
                 os.remove(f)
             os.rmdir(tmp)
-        except Exception:
-            pass
+        except Exception as e:  # noqa: BLE001
+            _warn(f"清理临时段失败（可手动删除）: {tmp} ({e})")
     return out_path
 
 
@@ -471,12 +512,12 @@ def run_file_pipeline(src_video, params, advanced, out_path, chunk_size=128,
     log("[Trunk] 合并分块（重叠去重 + 复用源音频）...")
     merge_chunk_videos(chunk_paths, out_path, overlap,
                        source_audio_path=src_video, fps=fps, crf=crf, ff=ff)
-    # 清理临时 chunk
+    # 清理临时 chunk（失败不致命，但需上报以便排错）
     try:
         for p in chunk_paths:
             os.remove(p)
         os.rmdir(tmpdir)
-    except Exception:
-        pass
+    except Exception as e:  # noqa: BLE001
+        _warn(f"清理临时 chunk 失败（可手动删除）: {tmpdir} ({e})")
     log(f"[Trunk] 完成: {out_path}")
     return out_path
